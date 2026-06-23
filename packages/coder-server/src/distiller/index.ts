@@ -41,6 +41,10 @@ export function isRoiPositive(c: WasteCandidate, synthCost: number, budget: Dist
   return c.frequency * c.tokensSavedEach >= budget.payback * synthCost;
 }
 
-// TODO(P3): synthesize ROI-positive candidates on the cheap tier under budget,
-// replay-validate against fixtures, emit Proposals into `.coder/proposals/`.
+// TODO(P3): scope detection to structural signatures (identical normalized tool-call
+// sequences) — the genuinely-free subset. Synthesize ROI-positive candidates on the
+// cheap tier under budget, replay-validate against recorded input→output fixtures,
+// dedup against the existing operation corpus, then emit Proposals into
+// `.coder/proposals/`. Anything synthesized starts on trust "probation" and earns trust
+// only via shadow checks — never auto-registered as authoritative. See docs/PLAN.md.
 export type DistillerProposal = Proposal;

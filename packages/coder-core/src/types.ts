@@ -1,80 +1,99 @@
 // Shared domain types for coder. Pure data shapes — no runtime deps.
 // These are the contracts every package agrees on; behavior lives in coder-server.
 
-/** Model tiers, cheapest-first. The Router picks the cheapest capable tier. */
+/** Model tiers, cheapest-first. The dispatcher picks the cheapest capable tier. */
 export type Tier = "cheap" | "fast" | "mid" | "deep";
 
-/** Normalized succinctness setting → per-provider output controls (PLAN R13). */
+/** Normalized output-control setting (see output control in docs/PLAN.md). */
 export type Succinctness = "low" | "normal" | "high";
 
+// ── Deterministic operations ────────────────────────────────────────────────
+// One building block. "Capabilities" and "Extractors" were the same thing seen
+// from two angles; they're unified here. An operation is plain code: input →
+// structured output, no model call. It has four independent properties.
+
+/** Where an operation is triggered. An operation may expose several surfaces. */
+export type Surface =
+  /** A `/`-command the user types. Zero model tokens. */
+  | { kind: "command"; name: string }
+  /** A tool the agent calls. Cheap (schema + call), not free; no reasoning chain. */
+  | { kind: "tool" }
+  /** Auto-applied to a noisy tool's output before context (the old "Extractor"). */
+  | { kind: "filter"; boundTo: string }
+  /** The dispatcher matches intent → operation directly. Zero model tokens. */
+  | { kind: "route" };
+
+/** local = fast, no network, runs anywhere. remote = network + creds, host-only, fallible. */
+export type Locality = "local" | "remote";
+
+/** Trust is earned, not granted. People decide what exists; evidence decides trust. */
+export type Trust = "builtin" | "probation" | "trusted";
+
+/** Almost all operations read; a few write (a deterministic code transform). */
+export type Effect = "read" | "write";
+
 /**
- * A Capability: a deterministic, structured op callable by the agent (as a tool) and
- * by the user (via `/`). One typed answer, no model call (PLAN R1, N2). Stored as a
- * file under `.coder/capabilities/<name>`.
+ * Spec for a deterministic operation. Stored as a file under `.coder/operations/<name>`;
+ * the runnable transform + input schema live in coder-server.
  */
-export interface CapabilitySpec {
+export interface OpSpec {
   name: string;
-  /** One-line description used for relevance gating / `find_capability`. */
+  /** One-line description used for relevance gating / dispatch. */
   description: string;
-  /** JSON-schema-ish shape of the input args (kept structured, sensible defaults). */
-  input?: Record<string, unknown>;
-  /** Where this det came from — source receipts for replay (PLAN R6). */
+  locality: Locality;
+  effect: Effect;
+  trust: Trust;
+  surfaces: Surface[];
+  /** Present iff the operation was machine-written by the Distiller. */
   provenance?: Provenance;
 }
 
-/**
- * An Extractor: a deterministic parser that reduces noisy tool output (test/lint/
- * build/git) to structured signal *before* it hits context; raw spills to disk (R2).
- */
-export interface ExtractorSpec {
-  name: string;
-  /** Which tool's output this extractor reduces (e.g. "bash:test"). */
-  appliesTo: string;
-  description: string;
-  provenance?: Provenance;
-}
-
-/** Where a distilled det came from — receipts that justify it (PLAN R5/R6). */
+/** Where a machine-written operation came from — receipts that justify it. */
 export interface Provenance {
-  /** Ledger receipt ids the Distiller mined to synthesize this det. */
+  /** Receipt ids the Distiller mined to synthesize this operation. */
   receiptIds: string[];
-  synthesizedBy?: "human" | "distiller";
   synthesizedAt?: string;
 }
 
-/**
- * One Ledger receipt per task — feeds the status bar *and* the Distiller (PLAN R10).
- * Append-only, crash-safe (N4).
- */
+// ── Measurement ─────────────────────────────────────────────────────────────
+
+/** The one accuracy signal we can stand behind for a given task — never a faked number. */
+export type AccuracySignal =
+  /** Code change: objective pass/fail from tests/typecheck. */
+  | { kind: "tests"; passed: boolean }
+  /** Deterministic op: did the op and the model agree on a shadow check? */
+  | { kind: "shadow"; agreed: boolean }
+  /** Free-text: no ground truth; carry the uncertainty signal instead. */
+  | { kind: "unverified"; verbosityRatio?: number };
+
+/** One receipt per task — append-only, crash-safe. Feeds the status bar + Distiller. */
 export interface Receipt {
   id: string;
   taskClass: string;
   tier: Tier;
-  /** Did a det short-circuit the model call? */
-  detHit: boolean;
+  /** Did a deterministic operation answer this, skipping the model? */
+  opHit: boolean;
   inputTokens: number;
   outputTokens: number;
   cachedTokens?: number;
   costUsd: number;
-  /** Tokens we avoided spending by hitting a det / extractor. */
+  /** Tokens we avoided by computing instead of inferring. */
   tokensAvoided: number;
-  /** Inference steps a det collapsed into one structured call. */
-  inferenceStepsSaved: number;
-  /** output ÷ minimal-answer estimate; a spike signals uncertainty (PLAN succinctness). */
-  verbosityRatio: number;
-  verifyPassed?: boolean;
+  /** The accuracy signal that actually applies to this task. */
+  accuracy: AccuracySignal;
   startedAt: string;
   endedAt: string;
 }
 
-/** A Distiller proposal awaiting human review (PLAN R5). Lands in `.coder/proposals/`. */
+// ── Proposals & registry ────────────────────────────────────────────────────
+
+/** A Distiller proposal awaiting human review. Lands in `.coder/proposals/`. */
 export interface Proposal {
   id: string;
-  kind: "capability" | "extractor";
-  spec: CapabilitySpec | ExtractorSpec;
+  spec: OpSpec;
   /** Projected net savings: freq × tokensSaved − payback × synthCost. */
   projectedRoi: number;
-  /** Result of replaying the synthesized det against real history. */
+  /** Replay of the synthesized operation against recorded input→output examples. */
   replay: ReplayResult;
 }
 
@@ -85,16 +104,16 @@ export interface ReplayResult {
   notes?: string;
 }
 
-/** Live registry stats aggregated from the Ledger (`.coder/registry.json`, PLAN R6). */
+/** Live registry stats aggregated from receipts (`.coder/registry.json`). */
 export interface RegistryEntry {
   name: string;
-  kind: "capability" | "extractor";
-  /** project-level dets win over global (~/.coder) — PLAN R6 precedence. */
+  /** project-level operations win over global (~/.coder). */
   scope: "project" | "global";
+  trust: Trust;
   hits: number;
   tokensAvoided: number;
   lastUsedAt?: string;
 }
 
-/** How the Router classified an intake (PLAN R4). */
-export type Classification = "det" | "command" | "free-text";
+/** How the dispatcher classified an intake. */
+export type Classification = "operation" | "command" | "free-text";

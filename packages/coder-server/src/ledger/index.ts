@@ -1,7 +1,7 @@
 // Ledger — one receipt per task. Local, file-based, crash-safe (append-only JSONL,
-// state derivable by replay — PLAN N4). Source of truth for the status bar *and* the
-// Distiller. Records the cost/token trio plus tokens-avoided, steps-saved, det-hit,
-// verbosity ratio, verifyPassed (PLAN R10).
+// state derivable by replay). Source of truth for the status bar *and* the Distiller.
+// Records the cost/token trio plus tokens-avoided, op-hit, and the accuracy signal.
+// (The agent's mutable scratchpad is a *separate* store — see coder-core `Notes`.)
 import { appendEvent, readEvents, type Receipt } from "coder-core";
 
 export class Ledger {
@@ -24,14 +24,12 @@ export class Ledger {
       tasks: receipts.length,
       costUsd: 0,
       tokensAvoided: 0,
-      inferenceStepsSaved: 0,
-      detHits: 0,
+      opHits: 0,
     };
     for (const r of receipts) {
       acc.costUsd += r.costUsd;
       acc.tokensAvoided += r.tokensAvoided;
-      acc.inferenceStepsSaved += r.inferenceStepsSaved;
-      if (r.detHit) acc.detHits += 1;
+      if (r.opHit) acc.opHits += 1;
     }
     return acc;
   }
@@ -41,6 +39,6 @@ export interface LedgerRollup {
   tasks: number;
   costUsd: number;
   tokensAvoided: number;
-  inferenceStepsSaved: number;
-  detHits: number;
+  /** How many tasks a deterministic operation answered, skipping the model. */
+  opHits: number;
 }

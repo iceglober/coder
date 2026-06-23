@@ -3,15 +3,15 @@ import { classify, escalate } from "../src/router/index.ts";
 import { shapeProse, verbosityRatio, VERBOSITY_SPIKE_THRESHOLD } from "../src/succinctness/index.ts";
 
 const deps = {
-  capabilityNames: new Set(["pr_status"]),
-  matchDet: (text: string) => (text.includes("pr") ? "pr_status" : undefined),
+  operationNames: new Set(["pr_status"]),
+  matchOperation: (text: string) => (text.includes("pr") ? "pr_status" : undefined),
 };
 
-describe("router", () => {
-  test("det match routes to a Capability (0 tokens)", () => {
+describe("dispatcher", () => {
+  test("match routes to a deterministic operation (0 tokens)", () => {
     const d = classify("what's the pr status", deps);
-    expect(d.classification).toBe("det");
-    expect(d.capability).toBe("pr_status");
+    expect(d.classification).toBe("operation");
+    expect(d.operation).toBe("pr_status");
   });
 
   test("slash routes to command bar", () => {

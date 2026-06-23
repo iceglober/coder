@@ -46,14 +46,15 @@ export function shapeProse(text: string): string {
 }
 
 /**
- * Layer 4 — measure & gate. verbosity ratio = output ÷ minimal-answer estimate.
- * A spike flags a low-confidence turn to the Router (verify/escalate). Computed with
- * no model call (N9); emitted as OTel metric `gen.output.verbosity`.
+ * Layer 4 — measure. verbosity ratio = output ÷ minimal-answer estimate. A spike is
+ * flagged as an uncertainty signal and fed to the Distiller — *not* an auto-escalation,
+ * so we never pay a pricier tier on a noisy proxy. Computed with no model call; emitted
+ * as the OTel metric `gen.output.verbosity`.
  */
 export function verbosityRatio(outputTokens: number, minimalEstimate: number): number {
   if (minimalEstimate <= 0) return 1;
   return outputTokens / minimalEstimate;
 }
 
-/** Above this ratio, treat the turn as low-confidence and signal the Router. */
+/** Above this ratio, flag the turn as uncertain (a signal, not a cost trigger). */
 export const VERBOSITY_SPIKE_THRESHOLD = 2.5;
