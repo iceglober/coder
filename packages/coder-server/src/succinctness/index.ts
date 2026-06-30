@@ -24,11 +24,13 @@ export function providerControls(setting: Succinctness): ProviderOutputControls 
   }
 }
 
-/** Layer 2 — output contract. Terse charter + Chain-of-Draft reasoning cap. */
+/** Layer 2 — output contract. Calculated brevity that doesn't muzzle the evidence the
+ *  reader needs (see the verdict standard in the charter / docs/accuracy.md). */
 export const OUTPUT_CONTRACT = [
-  "Use the fewest tokens that fully resolve the task.",
-  "No preamble or postamble. Prefer structured output where possible.",
-  "Reasoning scratchpad: Chain-of-Draft — at most ~5 words per step.",
+  "Lead with the conclusion; reasoning and evidence come after it, not before.",
+  "Calculated brevity — the fewest words that fully resolve the task, but never drop the",
+  "evidence a reader needs to verify a claim. No filler preamble or postamble.",
+  "Plain language: say what actually happens; avoid vague verbs and assumption-ridden jargon.",
 ].join(" ");
 
 /**

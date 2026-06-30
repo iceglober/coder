@@ -29,8 +29,13 @@ export type Locality = "local" | "remote";
 /** Trust is earned, not granted. People decide what exists; evidence decides trust. */
 export type Trust = "builtin" | "probation" | "trusted";
 
-/** Almost all operations read; a few write (a deterministic code transform). */
-export type Effect = "read" | "write";
+/** What a tool/operation does to the world:
+ *  - read   — observes only (read_file, grep, git_state).
+ *  - verify — runs the project's own checks (test/typecheck/lint); no source edits.
+ *  - write  — edits files or runs arbitrary commands (edit_file, bash).
+ *  A subagent's role is a filtered view over these (the investigator = read + verify), and the
+ *  permission policy gates by them. */
+export type Effect = "read" | "verify" | "write";
 
 /**
  * Spec for a deterministic operation. Stored as a file under `.coder/operations/<name>`;
@@ -56,31 +61,67 @@ export interface Provenance {
 }
 
 // ── Measurement ─────────────────────────────────────────────────────────────
+// We measure effort (computed) and borrow a verdict (the human). Machine checks are
+// gates, not scores — coder never grades its own correctness. See docs/accuracy.md.
 
-/** The one accuracy signal we can stand behind for a given task — never a faked number. */
-export type AccuracySignal =
-  /** Code change: objective pass/fail from tests/typecheck. */
-  | { kind: "tests"; passed: boolean }
-  /** Deterministic op: did the op and the model agree on a shadow check? */
-  | { kind: "shadow"; agreed: boolean }
-  /** Free-text: no ground truth; carry the uncertainty signal instead. */
-  | { kind: "unverified"; verbosityRatio?: number };
+/** Deterministic effort to reach the endpoint — the always-available half. */
+export interface Effort {
+  /** Model calls (steps) this task took. */
+  turns: number;
+  toolCalls: number;
+  /** Distinct files read / written. */
+  filesRead: number;
+  filesWritten: number;
+  /** Tool calls that exactly repeated an earlier one this task — a thrash signal (the model
+   *  re-running the same thing for no new info). Measured, never acted on mid-loop; feeds the
+   *  Distiller and low-confidence flags. The cure is a better tool (one call that answers), not a nudge. */
+  repeatedCalls: number;
+  /** Command tools (script/bash) that hit the wall-clock timeout and were killed. A few of these
+   *  mean a check doesn't complete in this environment (needs setup, or wrong scope). */
+  timeouts: number;
+  /** Total wall-clock spent inside tools this task, ms — the time the user actually waited, which
+   *  token cost hides (a timed-out test is cheap in tokens, expensive in minutes). */
+  toolMs: number;
+}
+
+/** Machine gate results — floors ("not obviously broken"), NOT a correctness score. */
+export interface Checks {
+  /** Result of a test run the agent triggered this task, if any. */
+  tests?: "pass" | "fail";
+}
+
+/** The only correctness signal — borrowed from the human, never computed.
+ *  - accepted / rejected: explicit sign-off (the human said yes / no).
+ *  - abandoned: the human bailed on an unsigned result (e.g. Ctrl-C). Behavioral, negative-ish.
+ *  - unknown: no signal at all (left via /exit or EOF without signing off). Never faked. */
+export type Verdict = "accepted" | "rejected" | "abandoned" | "unknown";
 
 /** One receipt per task — append-only, crash-safe. Feeds the status bar + Distiller. */
 export interface Receipt {
   id: string;
   taskClass: string;
   tier: Tier;
+  /** The concrete model that ran (absent when a deterministic operation answered). */
+  modelId?: string;
+  /** Why the turn stopped (e.g. "stop", "tool-calls", "length", "operation"). */
+  finishReason?: string;
   /** Did a deterministic operation answer this, skipping the model? */
   opHit: boolean;
   inputTokens: number;
   outputTokens: number;
+  /** Provider's total token count — the source of truth for billing; may exceed
+   *  input+output when the provider hides a breakdown (e.g. thinking tokens). */
+  totalTokens?: number;
   cachedTokens?: number;
   costUsd: number;
   /** Tokens we avoided by computing instead of inferring. */
   tokensAvoided: number;
-  /** The accuracy signal that actually applies to this task. */
-  accuracy: AccuracySignal;
+  /** Deterministic effort to the endpoint. */
+  effort: Effort;
+  /** Machine gate results (floors), if any ran. Not a correctness measure. */
+  checks?: Checks;
+  /** Borrowed human verdict — the correctness signal. "unknown" until captured. */
+  verdict: Verdict;
   startedAt: string;
   endedAt: string;
 }

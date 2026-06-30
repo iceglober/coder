@@ -1,7 +1,8 @@
 // Append-only event log — the crash-safe substrate behind the Ledger, sessions, and
 // structured note-taking (PLAN N4: state derivable by replay). One JSONL file per stream.
 
-import { appendFile, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 export interface LogEntry<T = unknown> {
   /** Monotonic-ish timestamp (ISO). Passed in by the caller — core stays pure. */
@@ -12,6 +13,7 @@ export interface LogEntry<T = unknown> {
 /** Append a single entry to a JSONL log. Atomic per-line; safe to tail concurrently. */
 export async function appendEvent<T>(path: string, at: string, data: T): Promise<void> {
   const entry: LogEntry<T> = { at, data };
+  await mkdir(dirname(path), { recursive: true }); // self-sufficient: create .coder/ if absent
   await appendFile(path, JSON.stringify(entry) + "\n", "utf8");
 }
 

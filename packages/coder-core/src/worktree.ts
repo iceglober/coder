@@ -3,6 +3,9 @@
 // prior art (`packages/cli/src/lib/worktree.ts`) — reference only, never imported.
 
 import { execFile } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -53,5 +56,37 @@ export function isInsideWorktree(root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(normalizedRoot);
 }
 
-// TODO(P0): createWorktree / removeWorktree, nested-clone guard (assertPrimaryClone),
-// per-worktree container + tmux pinning, drift watcher. See docs/PLAN.md § P0.
+/** Refuse to branch a worktree off a worktree. coder is meant to run from the primary clone; nesting
+ *  linked worktrees confuses git + the per-worktree `.coder/`. Throws if `root` is itself a LINKED
+ *  worktree (callers may catch + warn for the interactive case). No-op when `root` isn't a git repo. */
+export async function assertPrimaryClone(root: string): Promise<void> {
+  const trees = await listWorktrees(root).catch(() => [] as Worktree[]);
+  if (!trees.length) return;
+  const here = await git(root, ["rev-parse", "--show-toplevel"]).catch(() => root);
+  const self = trees.find((t) => t.path === here);
+  if (self && !self.isPrimary) {
+    const primary = trees.find((t) => t.isPrimary)?.path ?? "the primary clone";
+    throw new Error(`refusing to create a worktree inside a linked worktree (${here}). Run from ${primary}.`);
+  }
+}
+
+/** Create an isolated worktree + branch off `base` (default HEAD). Self-contained: plain `git worktree
+ *  add`, no glrs. The worktree lives under `~/.coder/worktrees/<repo>/<branch-slug>` so it never dirties
+ *  the repo or its parent. The caller reviews/merges the branch; the harness removes it after. */
+export async function createWorktree(root: string, opts: { branch?: string; base?: string } = {}): Promise<Worktree> {
+  await assertPrimaryClone(root);
+  const branch = opts.branch ?? `coder/wt-${Date.now()}`;
+  const base = opts.base ?? "HEAD";
+  const slug = branch.replace(/[^\w.-]+/g, "-");
+  const path = join(homedir(), ".coder", "worktrees", basename(root), slug);
+  await mkdir(dirname(path), { recursive: true });
+  await git(root, ["worktree", "add", "-b", branch, path, base]);
+  return { path, branch, isPrimary: false };
+}
+
+/** Remove a worktree created by `createWorktree` (and optionally delete its branch). `--force` so a
+ *  dirty worktree is still reaped — the changes are the point, but disposal is the caller's intent. */
+export async function removeWorktree(root: string, wt: Pick<Worktree, "path" | "branch">, opts: { deleteBranch?: boolean } = {}): Promise<void> {
+  await git(root, ["worktree", "remove", "--force", wt.path]);
+  if (opts.deleteBranch) await git(root, ["branch", "-D", wt.branch]).catch(() => {});
+}

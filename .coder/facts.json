@@ -1,0 +1,39 @@
+{
+  "computed": {
+    "toolchains": [
+      {
+        "name": "js",
+        "variant": "bun",
+        "dir": ".",
+        "commands": {
+          "install": "bun install",
+          "build": "bun run build",
+          "test": "bun run test",
+          "typecheck": "bun run typecheck",
+          "lint": "bun run lint",
+          "coder": "bun run coder"
+        },
+        "workspace": [
+          {
+            "dir": "packages/coder-docs",
+            "name": "coder-docs"
+          },
+          {
+            "dir": "packages/coder-core",
+            "name": "coder-core"
+          },
+          {
+            "dir": "packages/coder-server",
+            "name": "coder-server"
+          },
+          {
+            "dir": "packages/coder-tui",
+            "name": "coder-tui"
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": {},
+  "commands": {}
+}

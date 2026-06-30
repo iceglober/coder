@@ -1,0 +1,20 @@
+{
+  "name": "coder-docs",
+  "version": "0.0.0",
+  "private": true,
+  "description": "coder docs site — a basic overview of the tool's current state, served by Bun.",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "build": "echo 'static page served at runtime by src/index.ts'",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'no tests'",
+    "lint": "echo 'no linter configured yet'"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22",
+    "typescript": "^5"
+  }
+}

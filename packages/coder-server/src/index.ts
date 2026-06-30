@@ -2,13 +2,19 @@
 // AI SDK loop, with Capabilities/Extractors, Succinctness, Ledger, telemetry, Distiller.
 export * from "./server.ts";
 export * from "./runner.ts";
-export * from "./loop.ts";
 export * from "./router/index.ts";
 export * from "./operations/index.ts";
+export * from "./permission/index.ts";
 export * from "./succinctness/index.ts";
 export * from "./context/manager.ts";
+export * from "./context/compact.ts";
+export * from "./catalog/index.ts";
+export * from "./project/facts.ts";
 export * from "./ledger/index.ts";
 export * from "./tools/index.ts";
+export * from "./sandbox/index.ts";
+export * from "./sandbox/docker.ts";
+export * from "./sandbox/resources.ts";
 export * as telemetry from "./telemetry/otel.ts";
 export * as analytics from "./telemetry/counted.ts";
 export * as distiller from "./distiller/index.ts";

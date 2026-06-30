@@ -21,9 +21,9 @@
   },
   "dependencies": {
     "coder-core": "workspace:*",
-    "ai": "^4",
-    "@ai-sdk/anthropic": "^1",
-    "@ai-sdk/amazon-bedrock": "^1",
+    "ai": "^7",
+    "@ai-sdk/anthropic": "^4",
+    "@ai-sdk/google-vertex": "^5",
     "@counted/sdk": "^0.1.0",
     "@opentelemetry/api": "^1",
     "zod": "^3"

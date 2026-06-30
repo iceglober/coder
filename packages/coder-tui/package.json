@@ -11,7 +11,7 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
-    "build": "bun build src/index.ts --target=bun --outdir=dist",
+    "build": "bun build src/index.ts --target=bun --outdir=dist --external react-devtools-core",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint": "echo 'no linter configured yet'"

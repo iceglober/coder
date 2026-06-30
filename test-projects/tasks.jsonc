@@ -1,0 +1,173 @@
+// Eval tasks for coder. Per task: the runner copies `project` to a throwaway dir, applies `seed`
+// (optional baseline perturbation), commits, runs coder once on an isolated worktree, then GRADES by
+// whichever of these are present: `verify` (exit 0), `expect` (all substrings in coder's output),
+// `expectNoChange` (git diff empty). `needs` skips when a tool is absent.
+// Run all:  bun test-projects/run.ts    ·    one: bun test-projects/run.ts js-invest
+//
+// The pnpm-vitest-monorepo carries all 5 task types (Question · Investigation · Full S/M/A) on a clean
+// baseline; each Full task seeds its own challenge so they don't collide. python + go are simple-fix
+// tasks for now (5-type expansion pending).
+[
+  {
+    "id": "js-question",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "Which workspace package owns the currency formatting, and what is the exact name of the function it exports for that? Answer; don't change anything.",
+    "expect": ["@harness/core", "formatUSD"],
+    "expectNoChange": true,
+    "note": "Question: answer from the code, read-only (graded on facts + zero diff)."
+  },
+  {
+    "id": "js-investigation",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "Customers report that large orders (around $500 and up) silently fail — the order doesn't go through and they see no error. Investigate using the available logs and the operational database, and report the root cause: what rejects these orders, and at what configured limit? This is an INVESTIGATION ONLY — do NOT modify any files; just report your diagnosis.",
+    "setup": "sqlite3 ops/app.db < ops/seed.sql",
+    "needs": ["sqlite3"],
+    "expect": ["max_order_cents", "50000"],
+    "expectNoChange": true,
+    "note": "Investigation: the cause is only findable by correlating the app log + a DB config row + order.ts. Exercises the declared app-logs/db-query commands (by intent) + run_code. Diagnosis only (read-only)."
+  },
+  {
+    "id": "js-full-simple",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "A unit test is failing in @harness/core. Find the root cause and fix it so the whole test suite passes.",
+    "seed": "cp _seeds/money-bug.ts packages/core/src/money.ts",
+    "setup": "pnpm install --silent",
+    "verify": "pnpm -r test",
+    "note": "Full[Simple]: isolated one-file bug fix. Exercises workspace detection + single-test iteration + fixing source, not the test."
+  },
+  {
+    "id": "js-full-moderate",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "Add stacking discount codes to @harness/core. A code is either a percentage off or a fixed cents amount; a cart can apply several. Implement a `discount` module: `applyCodes(subtotalCents, codes)` applies the codes IN ORDER to a running total — percent codes take that percent off the current total (a percent above 100 is clamped to 100, never negative; round to the nearest cent), fixed codes subtract cents, and the total never drops below 0. Also add `cartTotalAfterCodes(items, codes)` that applies the codes to the cart subtotal. A test spec (`discount.test.ts`) defines the exact rules and edge cases.",
+    "seed": "cp _seeds/discount.test.ts packages/core/src/discount.test.ts",
+    "setup": "pnpm install --silent",
+    "verify": "pnpm -r test",
+    "note": "Full[Moderate] — mid-level, barely: a discount engine with order-dependent stacking, a 0 floor, a percent clamp, cent rounding, and cart wiring. The difficulty is the rules + edge cases, not the file count."
+  },
+  {
+    "id": "js-full-advanced",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "Make @harness/core currency-aware. Introduce a `Money` value type (cents + currency) with `Money.of(cents, currency)`, `.add`, `.subtract`, and `.format()` — formatting is currency-aware (USD → \"$12.99\", EUR → \"€12.99\") and arithmetic across DIFFERENT currencies must throw (no implicit conversion). Then migrate the domain to it: `formatUSD` must keep its exact existing output, and the cart's subtotal must become a `Money` in the cart's currency (a mixed-currency cart is rejected). Test specs (`money.currency.test.ts`, and a rewritten `cart.test.ts`) define the contract; all existing behavior must stay green.",
+    "seed": "cp _seeds/money-currency.test.ts packages/core/src/money.currency.test.ts && cp _seeds/cart-currency.test.ts packages/core/src/cart.test.ts",
+    "setup": "pnpm install --silent",
+    "verify": "pnpm -r test",
+    "note": "Full[Advanced] — staff+: introduce currency as a first-class concept (a Money value type with currency guards) and migrate money + cart to it while preserving formatUSD. Cross-module, architectural, behavior-preserving."
+  },
+  {
+    "id": "js-architect",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "The store applies money adjustments (a discount here, an order limit there) ad-hoc, and the team keeps needing new ones — taxes, shipping fees, loyalty credits. Design and implement an EXTENSIBLE pricing pipeline in @harness/core: a clean way to define pricing rules that transform a cart's running total in an explicit order, so adding a new rule type is easy and the order of application is clear. Decide the abstraction yourself, wire at least two concrete rules (e.g. a percentage discount and a flat fee) through it, and keep the existing code working. There is no test spec — make the design sound and verify it builds.",
+    "setup": "pnpm install --silent",
+    "verify": "pnpm -r test",
+    "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/interface mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
+    "note": "AMBIGUOUS-HARD (staff+): no spec — coder designs the abstraction. Graded by the LLM judge on design quality, plus verify that the baseline stays green."
+  },
+  {
+    "id": "py-question",
+    "project": "python-pytest",
+    "prompt": "Which module formats currency, and what is the exact name of the function it exports for that? Answer; don't change anything.",
+    "expect": ["money", "format_usd"],
+    "expectNoChange": true,
+    "note": "Question: answer from the code, read-only."
+  },
+  {
+    "id": "py-investigation",
+    "project": "python-pytest",
+    "prompt": "Customers report that large orders (around $500 and up) silently fail — the order doesn't go through and they see no error. Investigate using the available logs and the operational database, and report the root cause: what rejects these orders, and at what configured limit? This is an INVESTIGATION ONLY — do NOT modify any files; just report your diagnosis.",
+    "setup": "sqlite3 ops/app.db < ops/seed.sql",
+    "needs": ["sqlite3"],
+    "expect": ["max_order_cents", "50000"],
+    "expectNoChange": true,
+    "note": "Investigation: correlate the app log + a DB config row + order.py via the declared app-logs/db-query commands. Diagnose-only."
+  },
+  {
+    "id": "py-full-simple",
+    "project": "python-pytest",
+    "prompt": "A unit test is failing. Find the root cause and fix it so the test suite passes.",
+    "seed": "cp _seeds/money_bug.py money.py",
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
+    "verify": "python -m pytest -q",
+    "note": "Full[Simple]: isolated one-file bug fix; single-test iteration (pytest -k)."
+  },
+  {
+    "id": "py-full-moderate",
+    "project": "python-pytest",
+    "prompt": "Add stacking discount codes. A code is either a percentage off or a fixed cents amount; several can apply. Implement a `discount` module: `apply_codes(subtotal_cents, codes)` applies them IN ORDER to a running total — percent codes take that percent off the current total (clamp a percent above 100 to 100, never negative; round to the nearest cent), fixed codes subtract cents, and the total never drops below 0. Also add `cart_total_after_codes(items, codes)` over the cart subtotal. A test spec (test_discount.py) defines the exact rules and edge cases.",
+    "seed": "cp _seeds/test_discount.py test_discount.py",
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
+    "verify": "python -m pytest -q",
+    "note": "Full[Moderate] — mid-level barely: discount engine with order-dependent stacking, 0 floor, percent clamp, cent rounding, cart wiring."
+  },
+  {
+    "id": "py-full-advanced",
+    "project": "python-pytest",
+    "prompt": "Make the domain currency-aware. Introduce a `Money` value type (cents + currency) on the money module with `Money.of(cents, currency)`, `.add`, `.subtract`, and `.format()` — formatting is currency-aware (USD -> \"$12.99\", EUR -> \"€12.99\") and arithmetic across DIFFERENT currencies must raise. Then migrate: `format_usd` keeps its exact existing output, and the cart's `cart_subtotal` must return a `Money` in the cart's currency (a mixed-currency cart raises). Test specs (test_money_currency.py and a rewritten test_cart.py) define the contract; all existing behavior must stay green.",
+    "seed": "cp _seeds/test_money_currency.py test_money_currency.py && cp _seeds/test_cart_currency.py test_cart.py",
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
+    "verify": "python -m pytest -q",
+    "note": "Full[Advanced] — staff+: introduce currency as first-class (Money + currency guards) and migrate money + cart while preserving format_usd."
+  },
+  {
+    "id": "py-architect",
+    "project": "python-pytest",
+    "prompt": "The store applies money adjustments (a discount here, an order limit there) ad-hoc, and the team keeps needing new ones — taxes, shipping fees, loyalty credits. Design and implement an EXTENSIBLE pricing pipeline: a clean way to define pricing rules that transform a cart's running total in an explicit order, so adding a new rule type is easy and the order of application is clear. Decide the abstraction yourself, wire at least two concrete rules (e.g. a percentage discount and a flat fee) through it, and keep the existing code working. There is no test spec — make the design sound and verify it runs.",
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
+    "verify": "python -m pytest -q",
+    "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/protocol mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
+    "note": "AMBIGUOUS-HARD (staff+): no spec — coder designs the abstraction. LLM-judge graded on design + verify the baseline stays green."
+  },
+  {
+    "id": "go-question",
+    "project": "go-stdlib",
+    "prompt": "Which file in the store package formats currency, and what is the exact name of the function it exports for that? Answer; don't change anything.",
+    "expect": ["money", "FormatUSD"],
+    "expectNoChange": true,
+    "note": "Question: answer from the code, read-only."
+  },
+  {
+    "id": "go-investigation",
+    "project": "go-stdlib",
+    "prompt": "Customers report that large orders (around $500 and up) silently fail — the order doesn't go through and they see no error. Investigate using the available logs and the operational database, and report the root cause: what rejects these orders, and at what configured limit? This is an INVESTIGATION ONLY — do NOT modify any files; just report your diagnosis.",
+    "setup": "sqlite3 ops/app.db < ops/seed.sql",
+    "needs": ["sqlite3"],
+    "expect": ["max_order_cents", "50000"],
+    "expectNoChange": true,
+    "note": "Investigation: correlate the app log + a DB config row + order.go via the declared app-logs/db-query commands. Diagnose-only."
+  },
+  {
+    "id": "go-full-simple",
+    "project": "go-stdlib",
+    "prompt": "A unit test is failing. Find the root cause and fix it so the tests pass.",
+    "seed": "cp _seeds/money_bug.go store/money.go",
+    "needs": ["go"],
+    "verify": "go test ./...",
+    "note": "Full[Simple]: isolated one-file bug fix; package-scoped single-test iteration (go test -run)."
+  },
+  {
+    "id": "go-full-moderate",
+    "project": "go-stdlib",
+    "prompt": "Add stacking discount codes to the store package. A `DiscountCode` is either a percentage off (Kind \"percent\") or a fixed cents amount (Kind \"fixed\"); several can apply. Implement `ApplyCodes(subtotalCents int, codes []DiscountCode) int` that applies them IN ORDER to a running total — percent codes take that percent off the current total (clamp a percent above 100 to 100, never negative; round to the nearest cent), fixed codes subtract cents, and the total never drops below 0. Also add `CartTotalAfterCodes(items []LineItem, codes []DiscountCode) int` over the cart subtotal. A test spec (discount_test.go) defines the exact rules and edge cases.",
+    "seed": "cp _seeds/discount_test.go store/discount_test.go",
+    "needs": ["go"],
+    "verify": "go test ./...",
+    "note": "Full[Moderate] — mid-level barely: discount engine with order-dependent stacking, 0 floor, percent clamp, cent rounding, cart wiring."
+  },
+  {
+    "id": "go-full-advanced",
+    "project": "go-stdlib",
+    "prompt": "Make the store package currency-aware. Introduce a `Money` value type (cents + currency) with `MoneyOf(cents int, currency string) Money`, `Add`, `Subtract` (returning an error on different currencies — no implicit conversion), and `Format()` — currency-aware (USD -> \"$12.99\", EUR -> \"€12.99\"). Then migrate: `FormatUSD` keeps its exact existing output, `LineItem` gains a `Currency`, and `CartSubtotal(items []LineItem) (Money, error)` returns a Money in the cart's currency (a mixed-currency cart returns an error). Test specs (money_currency_test.go and a rewritten cart_test.go) define the contract; existing behavior must stay green.",
+    "seed": "cp _seeds/money_currency_test.go store/money_currency_test.go && cp _seeds/cart_currency_test.go store/cart_test.go",
+    "needs": ["go"],
+    "verify": "go test ./...",
+    "note": "Full[Advanced] — staff+: introduce currency as first-class (Money + currency guards via Go error returns) and migrate money + cart while preserving FormatUSD."
+  },
+  {
+    "id": "go-architect",
+    "project": "go-stdlib",
+    "prompt": "The store package applies money adjustments (a discount here, an order limit there) ad-hoc, and the team keeps needing new ones — taxes, shipping fees, loyalty credits. Design and implement an EXTENSIBLE pricing pipeline: a clean way to define pricing rules that transform a cart's running total in an explicit order, so adding a new rule type is easy and the order of application is clear. Decide the abstraction yourself (an interface fits Go well), wire at least two concrete rules (e.g. a percentage discount and a flat fee) through it, and keep the existing code working. There is no test spec — make the design sound and verify it builds.",
+    "needs": ["go"],
+    "verify": "go test ./...",
+    "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/interface mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
+    "note": "AMBIGUOUS-HARD (staff+): no spec — coder designs the abstraction (a Go interface). LLM-judge graded on design + verify the baseline stays green."
+  }
+]
