@@ -9,7 +9,7 @@
 // terminal — no server, no port. The HTTP server is the opt-in transport for when the
 // agent and UI live in different processes (isolated container, remote, multi-client).
 import { join } from "node:path";
-import { ensureCatalog, Ledger, type LedgerRollup, listModels, lookupModel, refreshProjectFacts, renderFacts, runOnce, startServer } from "coder-server";
+import { clearServerAuth, connectServers, ensureCatalog, hasStaticAuth, Ledger, type LedgerRollup, listModels, loadMcpServers, loginToServer, lookupModel, refreshProjectFacts, renderFacts, runOnce, startServer } from "coder-server";
 import type { Posture, Provider, SandboxKind } from "coder-server";
 import { POSTURES } from "coder-server";
 import { createWorktree } from "coder-core";
@@ -28,11 +28,12 @@ USAGE
   coder --once "<task>"     run one task and exit
   coder --serve             host an agent server (HTTP/SSE)
   coder --connect <url>     attach to a running server (chat, or with --once)
+  coder mcp <cmd>           manage MCP servers: login <name> · logout <name> · list
 
 OPTIONS
   --tier <cheap|fast|mid|deep>      model tier (default: mid; env CODER_TIER)
   --model <id>                      exact model id (overrides tier; env CODER_MODEL)
-  --provider <vertex|anthropic>     where the model runs (default: vertex; env CODER_PROVIDER)
+  --provider <vertex|anthropic|azure>  where the model runs (default: vertex; env CODER_PROVIDER)
   --sandbox <host|docker>           where shell commands run (default: host; env CODER_SANDBOX)
   --mode <auto|ask|auto-edit|plan>  permission posture (default: auto; env CODER_PERMISSION_MODE)
   --port <n>                        (with --serve) listen port (default 4123; env CODER_PORT)
@@ -42,11 +43,17 @@ OPTIONS
 
 Auth — vertex (default) runs Gemini: needs GOOGLE_VERTEX_PROJECT with gcloud
 application-default credentials. anthropic runs Claude: needs ANTHROPIC_API_KEY.
+azure runs Azure AI Foundry's OpenAI-compatible endpoint: needs AZURE_BASE_URL +
+AZURE_API_KEY (AZURE_API_VERSION optional) and an explicit --model / CODER_MODEL
+(your deployment name — azure has no default model).
 --mode auto (default) runs edits and shell without asking; pair with --sandbox
-docker when running anything you don't fully trust.`;
+docker when running anything you don't fully trust.
+
+MCP — configure servers in .mcp.json (Claude Code's format). For an OAuth server
+like Linear, run \`coder mcp login <name>\` once; its tools then appear to the agent.`;
 
 const TIERS = new Set<Tier>(["cheap", "fast", "mid", "deep"]);
-const PROVIDERS = new Set<Provider>(["anthropic", "vertex"]);
+const PROVIDERS = new Set<Provider>(["anthropic", "vertex", "azure"]);
 const SANDBOXES = new Set<SandboxKind>(["host", "docker"]);
 
 interface RunBase {
@@ -91,7 +98,7 @@ const isYes = (s: string | null): boolean => s != null && /^y(es)?$/i.test(s.tri
 const dim = (s: string): string => `\x1b[90m${s}\x1b[39m`;
 
 /** models.dev catalog key for our provider (where pricing/model lists are indexed). */
-const catalogKey = (p?: Provider): string => (p === "anthropic" ? "anthropic" : "google-vertex");
+const catalogKey = (p?: Provider): string => (p === "anthropic" ? "anthropic" : p === "azure" ? "azure" : "google-vertex");
 
 /** The ledger rollup, formatted for the chat's `/stats`. */
 function formatStats(r: LedgerRollup): string {
@@ -254,6 +261,13 @@ async function chatLocal(root: string, base: RunBase): Promise<number> {
             process.stdin.on("data", onKey);
             return isYes(ans);
           },
+          confirmMcpAuth: async (server) => {
+            process.stdin.off("data", onKey);
+            renderer.finish();
+            const ans = await reader.read(`  authorize MCP server "${server}" in your browser? [y/N] `);
+            process.stdin.on("data", onKey);
+            return isYes(ans);
+          },
         });
       } finally {
         process.stdin.off("data", onKey);
@@ -369,6 +383,73 @@ async function chatViaServer(baseUrl: string, bearer: string): Promise<number> {
   return 0;
 }
 
+/** `coder mcp <login|logout|list>` — manage MCP servers from Claude Code's `.mcp.json`. */
+async function runMcp(argv: string[]): Promise<number> {
+  const sub = argv[0];
+  const root = await repoRoot();
+  const servers = await loadMcpServers(root);
+
+  if (sub === "list") {
+    if (!servers.length) {
+      console.error("[coder] no MCP servers configured. Add them to .mcp.json (Claude Code format).");
+      return 0;
+    }
+    const { connections, needsAuth, warnings, close } = await connectServers(servers);
+    for (const s of servers) {
+      const conn = connections.find((c) => c.server === s.name);
+      const needsLogin = needsAuth.some((n) => n.name === s.name);
+      const state = conn
+        ? `✓ connected · ${conn.tools.length} tool${conn.tools.length === 1 ? "" : "s"}`
+        : needsLogin
+          ? `🔑 needs login — run \`coder mcp login ${s.name}\``
+          : "✗ not connected";
+      console.error(`  ${s.name.padEnd(20)} ${s.transport.padEnd(6)} ${state}`);
+    }
+    for (const w of warnings) console.error(`  ⚠ ${w}`);
+    await close();
+    return 0;
+  }
+
+  if (sub === "login") {
+    const name = argv[1];
+    const cfg = servers.find((s) => s.name === name);
+    if (!name || !cfg) {
+      console.error(`[coder] usage: coder mcp login <name>\n  configured: ${servers.map((s) => s.name).join(", ") || "(none)"}`);
+      return 1;
+    }
+    if (cfg.transport === "stdio") {
+      console.error(`[coder] "${name}" is a stdio server — no login needed`);
+      return 0;
+    }
+    if (hasStaticAuth(cfg)) {
+      console.error(`[coder] "${name}" uses a static Authorization header — no login needed`);
+      return 0;
+    }
+    try {
+      await loginToServer(name, cfg.url);
+      console.error(`[coder] ✓ authorized ${name}`);
+      return 0;
+    } catch (err) {
+      console.error(`[coder] login failed: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+
+  if (sub === "logout") {
+    const name = argv[1];
+    if (!name) {
+      console.error("[coder] usage: coder mcp logout <name>");
+      return 1;
+    }
+    await clearServerAuth(name);
+    console.error(`[coder] logged out ${name}`);
+    return 0;
+  }
+
+  console.error("[coder] usage: coder mcp <login|logout|list> [name]");
+  return sub ? 1 : 0;
+}
+
 export async function main(argv: string[]): Promise<void> {
   if (argv.includes("-h") || argv.includes("--help")) {
     console.log(HELP);
@@ -376,6 +457,12 @@ export async function main(argv: string[]): Promise<void> {
   }
   if (argv.includes("-v") || argv.includes("--version")) {
     console.log(VERSION);
+    return;
+  }
+
+  // `coder mcp …` — manage MCP servers (login/logout/list). Runs and exits before any chat UI.
+  if (argv[0] === "mcp") {
+    process.exitCode = await runMcp(argv.slice(1));
     return;
   }
 

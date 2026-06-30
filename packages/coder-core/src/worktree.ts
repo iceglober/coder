@@ -16,6 +16,9 @@ export interface Worktree {
   branch: string;
   /** True for the primary clone (not a linked worktree). */
   isPrimary: boolean;
+  /** Commit the worktree was branched from (set by `createWorktree`). The reference point for
+   *  `worktreeHasChanges` — "has anything happened here since it was created?". */
+  base?: string;
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -26,6 +29,12 @@ async function git(cwd: string, args: string[]): Promise<string> {
 /** Current branch of the worktree at `dir`. */
 export async function currentBranch(dir: string): Promise<string> {
   return git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+}
+
+/** True when `dir` has uncommitted changes (staged, unstaged, or untracked). Used to warn that a
+ *  fresh worktree — branched off HEAD — won't include the primary checkout's in-flight edits. */
+export async function hasUncommittedChanges(dir: string): Promise<boolean> {
+  return !!(await git(dir, ["status", "--porcelain"]).catch(() => ""));
 }
 
 /** List all worktrees of the repo containing `dir` (parsed from porcelain output). */
@@ -77,11 +86,51 @@ export async function createWorktree(root: string, opts: { branch?: string; base
   await assertPrimaryClone(root);
   const branch = opts.branch ?? `coder/wt-${Date.now()}`;
   const base = opts.base ?? "HEAD";
+  const baseSha = await git(root, ["rev-parse", base]).catch(() => ""); // recorded for later "has it changed?"
   const slug = branch.replace(/[^\w.-]+/g, "-");
   const path = join(homedir(), ".coder", "worktrees", basename(root), slug);
   await mkdir(dirname(path), { recursive: true });
   await git(root, ["worktree", "add", "-b", branch, path, base]);
-  return { path, branch, isPrimary: false };
+  return { path, branch, isPrimary: false, base: baseSha };
+}
+
+export interface ReapResult {
+  /** The worktree DIRECTORY was removed. */
+  removed: boolean;
+  /** The branch was retained (it holds work) rather than deleted. */
+  branchKept: boolean;
+  /** Uncommitted changes were captured as a WIP commit before removal, so nothing was lost. */
+  committed: boolean;
+  /** When `removed` is false, why — so the caller can report it instead of silently leaving it. */
+  reason?: string;
+}
+
+/**
+ * Reap a tab's worktree: always remove the DIRECTORY, keep the BRANCH when it holds work.
+ *
+ * The directory is the clutter; the branch is the value. But uncommitted changes live only in the
+ * directory — so if the worktree is dirty we first commit them as a WIP snapshot, then remove the
+ * directory. The branch is kept when it has any work (a commit past `base`, including the WIP one we
+ * just made) and deleted when the worktree was never touched (no empty branch left behind).
+ *
+ * Safe by construction: if anything fails (e.g. no git identity to commit with), it removes nothing
+ * and returns `{ removed: false, reason }`, so the caller keeps + reports it rather than losing work.
+ */
+export async function reapWorktree(root: string, wt: Pick<Worktree, "path" | "branch" | "base">): Promise<ReapResult> {
+  try {
+    let committed = false;
+    if (await git(wt.path, ["status", "--porcelain"])) {
+      await git(wt.path, ["add", "-A"]);
+      await git(wt.path, ["commit", "-q", "--no-verify", "-m", "coder: WIP snapshot before worktree reap"]);
+      committed = true;
+    }
+    const hasWork = wt.base ? (await git(wt.path, ["rev-list", "--count", `${wt.base}..HEAD`])) !== "0" : committed;
+    await git(root, ["worktree", "remove", "--force", wt.path]);
+    if (!hasWork) await git(root, ["branch", "-D", wt.branch]).catch(() => {});
+    return { removed: true, branchKept: hasWork, committed };
+  } catch (err) {
+    return { removed: false, branchKept: true, committed: false, reason: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Remove a worktree created by `createWorktree` (and optionally delete its branch). `--force` so a

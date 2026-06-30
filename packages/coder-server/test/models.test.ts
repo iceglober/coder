@@ -25,49 +25,52 @@ describe("model family + pricing", () => {
   });
 
   test("every tier resolves to a model id per provider", () => {
-    const vertex = tierModels("vertex");
+    const vertex = tierModels("vertex")!;
     expect(vertex.deep).toContain("gemini");
     expect(vertex.mid).toContain("gemini");
     expect(vertex.fast).toContain("flash-lite");
     expect(vertex.cheap).toContain("flash-lite");
 
-    const anthropic = tierModels("anthropic");
+    const anthropic = tierModels("anthropic")!;
     expect(anthropic.deep).toContain("opus");
     expect(anthropic.mid).toContain("sonnet");
     expect(anthropic.fast).toContain("haiku");
   });
+
+  test("azure has no tier defaults — addressed by deployment name instead", () => {
+    expect(tierModels("azure")).toBeUndefined();
+  });
 });
 
 describe("provider selection + preflight", () => {
-  const saved = {
-    provider: process.env.CODER_PROVIDER,
-    key: process.env.ANTHROPIC_API_KEY,
-    project: process.env.GOOGLE_VERTEX_PROJECT,
-    location: process.env.GOOGLE_VERTEX_LOCATION,
-  };
+  const MANAGED = [
+    "CODER_PROVIDER",
+    "CODER_MODEL",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_VERTEX_PROJECT",
+    "GOOGLE_VERTEX_LOCATION",
+    "AZURE_BASE_URL",
+    "AZURE_API_KEY",
+    "AZURE_API_VERSION",
+  ] as const;
+  const saved = Object.fromEntries(MANAGED.map((k) => [k, process.env[k]]));
 
   beforeEach(() => {
-    delete process.env.CODER_PROVIDER;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.GOOGLE_VERTEX_PROJECT;
-    delete process.env.GOOGLE_VERTEX_LOCATION;
+    for (const k of MANAGED) delete process.env[k];
   });
 
   afterEach(() => {
-    for (const [k, v] of Object.entries({
-      CODER_PROVIDER: saved.provider,
-      ANTHROPIC_API_KEY: saved.key,
-      GOOGLE_VERTEX_PROJECT: saved.project,
-      GOOGLE_VERTEX_LOCATION: saved.location,
-    })) {
+    for (const k of MANAGED) {
+      const v = saved[k];
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
   });
 
-  test("resolveProvider defaults to vertex, honors explicit anthropic, ignores junk", () => {
+  test("resolveProvider defaults to vertex, honors explicit anthropic/azure, ignores junk", () => {
     expect(resolveProvider(undefined)).toBe("vertex");
     expect(resolveProvider("anthropic")).toBe("anthropic");
+    expect(resolveProvider("azure")).toBe("azure");
     expect(resolveProvider("bogus")).toBe("vertex");
   });
 
@@ -85,5 +88,18 @@ describe("provider selection + preflight", () => {
     // An explicit region is fine too, but not required.
     process.env.GOOGLE_VERTEX_LOCATION = "us-east5";
     expect(preflight("vertex")).toBeNull();
+  });
+
+  test("azure preflight needs endpoint, key, and an explicit model", () => {
+    expect(preflight("azure", "my-deployment")).toContain("AZURE_BASE_URL");
+    process.env.AZURE_BASE_URL = "https://r.services.ai.azure.com/models";
+    expect(preflight("azure", "my-deployment")).toContain("AZURE_API_KEY");
+    process.env.AZURE_API_KEY = "az-test";
+    // Endpoint + key present but no model named → still not ready (azure has no default).
+    expect(preflight("azure")).toContain("no default model");
+    expect(preflight("azure", "my-deployment")).toBeNull();
+    // CODER_MODEL satisfies the model requirement without an explicit arg.
+    process.env.CODER_MODEL = "my-deployment";
+    expect(preflight("azure")).toBeNull();
   });
 });

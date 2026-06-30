@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { builtinOperations } from "../src/operations/builtins.ts";
+import { checkout } from "../src/operations/checkout.ts";
 import { definitionPattern, parseDefMatches } from "../src/operations/find-def.ts";
 import { parseGitStatus } from "../src/operations/git-state.ts";
 import { parseTestOutput, testFilter } from "../src/operations/test-filter.ts";
@@ -21,6 +23,20 @@ describe("git_state parsing", () => {
     expect(s.branch).toBe("work");
     expect(s.upstream).toBeUndefined();
     expect(s.clean).toBe(true);
+  });
+});
+
+describe("checkout op", () => {
+  test("is a registered write-effect tool", () => {
+    expect(builtinOperations().some((op) => op.spec.name === "checkout")).toBe(true);
+    expect(checkout.spec.effect).toBe("write"); // gated + dropped from the read-only investigator
+    expect(checkout.spec.surfaces.some((s) => s.kind === "tool")).toBe(true);
+  });
+
+  test("with neither pr nor branch, asks for one (no git mutation)", async () => {
+    const res = await checkout.run?.({}, { worktreeRoot: process.cwd() });
+    expect(res?.ok).toBe(false);
+    expect(res?.message).toContain("pass either");
   });
 });
 

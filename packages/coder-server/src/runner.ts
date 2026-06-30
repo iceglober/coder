@@ -5,10 +5,14 @@
 // same events to a connected client. Single source of truth, many renderers.
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { generateObject, generateText, type LanguageModel, type ModelMessage, stepCountIs, ToolLoopAgent } from "ai";
+import { generateObject, generateText, type LanguageModel, type ModelMessage, stepCountIs, ToolLoopAgent, type ToolSet } from "ai";
 import { z } from "zod";
-import type { Receipt, ServerEvent, Tier } from "coder-core";
+import type { Effect, Receipt, ServerEvent, Tier } from "coder-core";
 import { costOf, preflight, resolveModel, resolveProvider, type Provider } from "./agent/models.ts";
+import { connectOne, connectServers } from "./mcp/client.ts";
+import { loadMcpServers } from "./mcp/config.ts";
+import { loginToServer } from "./mcp/oauth.ts";
+import { mcpEffects, mcpToolSet } from "./mcp/tools.ts";
 import { DockerSandbox } from "./sandbox/docker.ts";
 
 export type { Provider } from "./agent/models.ts";
@@ -37,7 +41,7 @@ export interface RunOnceOptions {
   root: string;
   tier?: Tier;
   modelId?: string;
-  /** Where the model runs (anthropic-direct or vertex); default CODER_PROVIDER. */
+  /** Where the model runs (vertex, anthropic-direct, or azure); default CODER_PROVIDER. */
   provider?: Provider;
   /** Where shell commands run (host or docker); default CODER_SANDBOX. */
   sandbox?: SandboxKind;
@@ -54,6 +58,10 @@ export interface RunOnceOptions {
   /** Approval gate for mutating tools (write/edit/bash). When omitted, they auto-run
    *  (the headless default — there's no client to ask). */
   requestPermission?: (tool: string, preview: string) => Promise<boolean>;
+  /** Ask whether to authorize an MCP server that needs OAuth, mid-run. Returning true runs the
+   *  browser flow in-session and makes the server's tools available this turn. Interactive callers
+   *  (TUI / classic) provide it; headless/server runs omit it and just warn. */
+  confirmMcpAuth?: (server: string) => Promise<boolean>;
   /** Prior conversation, so the model has context across turns. Empty/absent = fresh. */
   history?: ModelMessage[];
   /** A command's process group started (pgid) or ended (null) — for per-session resource monitoring. */
@@ -102,6 +110,10 @@ if (process.env.CODER_SDK_WARNINGS !== "1") {
 }
 
 const MAX_STEPS = Number(process.env.CODER_MAX_STEPS) || 40;
+// When a run hits the step ceiling, auto-continue from its progress note within the same turn this
+// many times before handing back to the user — so a big task (e.g. fix a PR's conflicts + checks)
+// finishes on its own instead of stalling at "try again". 0 disables (CODER_MAX_CONTINUATIONS).
+const MAX_CONTINUATIONS = Number(process.env.CODER_MAX_CONTINUATIONS ?? 3);
 // At the step limit, don't demand a final verdict (which invites "I was stopped, I have nothing").
 // Ask for a RESUMABLE PROGRESS NOTE — it becomes the working memory the next turn (or the
 // implementer) continues from, and the "don't repeat" line discourages re-thrashing what was tried.
@@ -181,7 +193,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
     modelId = opts.modelId ?? "mock";
   } else {
     provider = opts.provider ?? resolveProvider();
-    const credError = preflight(provider);
+    const credError = preflight(provider, opts.modelId);
     if (credError) {
       opts.emit?.({ type: "turn.error", sessionId: opts.sessionId ?? "once", message: credError });
       return { ok: false, error: credError };
@@ -209,13 +221,46 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
     }
   }
 
+  // MCP servers (Claude Code's `.mcp.json`): connect once and expose their tools to all phases this
+  // turn. (v1 reconnects each turn — connection reuse across turns is a follow-up.)
+  const sid = opts.sessionId ?? "once";
+  const note = (text: string): void => {
+    opts.emit?.({ type: "message.delta", sessionId: sid, text });
+    if (!opts.emit) process.stderr.write(`[coder] ${text.trim()}\n`);
+  };
+  const mcpServers = await loadMcpServers(opts.root);
+  const mcp = mcpServers.length ? await connectServers(mcpServers) : undefined;
+  if (mcp) {
+    // A server needing OAuth: offer an in-session login (interactive callers only) so the user
+    // doesn't have to quit and run `coder mcp login`. Decline / no callback → warn and skip it.
+    for (const cfg of mcp.needsAuth) {
+      const ok = opts.confirmMcpAuth ? await opts.confirmMcpAuth(cfg.name) : false;
+      if (!ok) {
+        note(`\n⚠ MCP "${cfg.name}" needs authorization — run \`coder mcp login ${cfg.name}\``);
+        continue;
+      }
+      try {
+        note(`\n🔑 authorizing ${cfg.name} — finish the login in your browser…`);
+        await loginToServer(cfg.name, cfg.url, { onRedirect: (u) => note(`\n  ${u}`) });
+        mcp.connections.push(await connectOne(cfg)); // reconnect now-authorized; close() covers it
+        note(`\n✓ ${cfg.name} authorized`);
+      } catch (err) {
+        note(`\n⚠ MCP "${cfg.name}" login failed: ${asMessage(err)}`);
+      }
+    }
+    for (const w of mcp.warnings) note(`\n⚠ ${w}`);
+  }
+  const mcpTools = mcp ? mcpToolSet(mcp.connections) : undefined;
+  const mcpEffectMap = mcp ? mcpEffects(mcp.connections) : undefined;
+
   try {
-    const result = withSignoff(await orchestrate({ ...opts, model, modelId, tier, provider, ledger, runner: sandbox }));
+    const result = withSignoff(await orchestrate({ ...opts, model, modelId, tier, provider, ledger, runner: sandbox, mcpTools, mcpEffects: mcpEffectMap }));
     // One terminal turn.idle per user turn (sub-runs no longer emit it), after any phase.end.
     if (result.ok) opts.emit?.({ type: "turn.idle", sessionId: opts.sessionId ?? "once" });
     return result;
   } finally {
     await sandbox?.stop();
+    await mcp?.close();
   }
 }
 
@@ -296,6 +341,30 @@ async function triage(args: StreamArgs): Promise<"investigate" | "direct" | "dia
  */
 const banner = (s: string) => process.stderr.write(`\n\x1b[1;36m▸ ${s}\x1b[0m\n`);
 
+/**
+ * Run a phase to completion. If it hits the step ceiling (cutOff), continue from its own resumable
+ * progress note within the same turn — up to MAX_CONTINUATIONS — so the user doesn't have to keep
+ * typing "try again". The note is the handoff (context stays small); the original task is restated.
+ */
+async function runToCompletion(args: StreamArgs, onTokens: (n: number) => void): Promise<RunOnceResult> {
+  const sid = args.sessionId ?? "once";
+  let res = await runStream(args);
+  onTokens(res.receipt?.totalTokens ?? 0);
+  let conts = 0;
+  while (res.ok && res.cutOff && conts < MAX_CONTINUATIONS) {
+    conts += 1;
+    banner(`continuing past the step limit (${conts}/${MAX_CONTINUATIONS})`);
+    args.emit?.({ type: "message.delta", sessionId: sid, text: `\n↻ step limit hit — continuing (${conts}/${MAX_CONTINUATIONS})\n` });
+    const note = lastAssistantText(res.messages) ?? "";
+    res = await runStream({
+      ...args,
+      task: `Continue this task from your own RESUMABLE PROGRESS NOTE below. Do NOT repeat work already done — pick up at "Next step", finish the task, and verify.\n\nPROGRESS NOTE:\n${note}\n\nORIGINAL TASK: ${args.task}`,
+    });
+    onTokens(res.receipt?.totalTokens ?? 0);
+  }
+  return res;
+}
+
 async function orchestrate(args: StreamArgs): Promise<RunOnceResult> {
   const emit = args.emit;
   const sid = args.sessionId ?? "once";
@@ -309,8 +378,9 @@ async function orchestrate(args: StreamArgs): Promise<RunOnceResult> {
     // never the tool transcript. phase.start/end let a client collapse its tools under one row.
     if (args.provider) banner("triage: direct — acting on it");
     emit?.({ type: "phase.start", sessionId: sid, phase: "direct", label: "working" });
-    const res = await runStream(args);
-    subagent += res.receipt?.totalTokens ?? 0;
+    const res = await runToCompletion(args, (n) => {
+      subagent += n;
+    });
     emit?.({ type: "phase.end", sessionId: sid, phase: "direct", verdict: lastAssistantText(res.messages) });
     if (!res.ok) return res;
     return meter({ ...res, messages: [...prior, { role: "user", content: args.task }, { role: "assistant", content: lastAssistantText(res.messages) ?? "" }] });
@@ -344,8 +414,9 @@ async function orchestrate(args: StreamArgs): Promise<RunOnceResult> {
     : `A prior investigation diagnosed this task. Apply the fix it describes — re-read only the files it names, make the change, and verify if practical.\n\nDIAGNOSIS:\n${verdict}\n\nORIGINAL TASK: ${args.task}`;
   banner(inv.cutOff ? "implement: continuing the cut-off investigation" : "implement: applying the fix from the diagnosis");
   emit?.({ type: "phase.start", sessionId: sid, phase: "implement", label: inv.cutOff ? "continuing" : "implementing" });
-  const impl = await runStream({ ...args, task: implTask }); // keeps args.history for continuity
-  subagent += impl.receipt?.totalTokens ?? 0;
+  const impl = await runToCompletion({ ...args, task: implTask }, (n) => {
+    subagent += n;
+  }); // keeps args.history for continuity; auto-continues if the implementer also hits the ceiling
   emit?.({ type: "phase.end", sessionId: sid, phase: "implement", verdict: lastAssistantText(impl.messages) });
   const report = lastAssistantText(impl.messages) ?? "";
   const changed = impl.changedFiles?.length ? `\n📝 changed: ${impl.changedFiles.join(", ")}` : "";
@@ -401,6 +472,10 @@ interface StreamArgs extends RunOnceOptions {
   provider?: Provider;
   ledger: Ledger;
   runner?: DockerSandbox;
+  /** MCP tools (already adapted) injected into every phase's tool set this turn. */
+  mcpTools?: ToolSet;
+  /** Effects for the MCP tools (default `write`) — feeds role filtering + permission gating. */
+  mcpEffects?: Map<string, Effect>;
 }
 
 async function runStream(opts: StreamArgs): Promise<RunOnceResult> {
@@ -435,9 +510,10 @@ async function runStream(opts: StreamArgs): Promise<RunOnceResult> {
   const signals = new RunSignals();
   const bashFilterOp = ops.filterFor("bash");
   const bashFilter = bashFilterOp?.filter ? (out: string) => bashFilterOp.filter!(out) : undefined;
-  const policy = new PermissionPolicy({ mode: posture });
   const opTools = ops.tools();
-  const opEffect = new Map(opTools.map((op) => [op.spec.name, op.spec.effect] as const));
+  // Effects for non-built-in tools (operations + MCP) — drives both the role filter and gating.
+  const effects = new Map<string, Effect>([...opTools.map((op) => [op.spec.name, op.spec.effect] as const), ...(opts.mcpEffects ?? [])]);
+  const policy = new PermissionPolicy({ mode: posture, effects });
   const allTools = {
     ...makeTools({
       root: opts.root,
@@ -466,10 +542,12 @@ async function runStream(opts: StreamArgs): Promise<RunOnceResult> {
       },
     }),
     ...operationToolSet(opTools, opCtx),
+    ...(opts.mcpTools ?? {}),
   };
   // The role is a filtered view of the registry by effect — that's the whole definition of the
-  // read-only investigator (no write tools), not a separate permission mode.
-  const tools = toolsForRole(allTools, role, opEffect);
+  // read-only investigator (no write tools), not a separate permission mode. MCP tools default to
+  // `write`, so the investigator never gets them.
+  const tools = toolsForRole(allTools, role, effects);
   // Wrap each tool's execute to emit tool.start/tool.end AROUND execution, with timing — so a
   // client can show a live indicator that resolves to elapsed + status. (onStepFinish fires only
   // after the whole step, too late for a "running" indicator.) For process-spawning command tools

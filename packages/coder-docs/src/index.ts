@@ -44,8 +44,8 @@ const SECTIONS: Section[] = [
 - pr-checks(pr) — list a PR's CI status     (declared → runs \`gh pr checks\`)
 - test-db — stand up the test database      (declared)</code></pre>
       <p>A catalog line costs ~24 tokens; the same thing as a native tool is 60+, and a typical MCP tool 550–1,400.
-      So a toolchain task, a project command, and (later) an MCP tool are all just catalog entries the dispatcher routes
-      to — different implementations, one cheap surface. If the model gets the args wrong, the dispatcher replies with the
+      So a toolchain task, a project command, and an MCP tool (from a server in <code>.mcp.json</code>) are all just
+      catalog entries the dispatcher routes to — different implementations, one cheap surface. If the model gets the args wrong, the dispatcher replies with the
       exact usage. A subagent's role is just a <em>filtered view of capabilities by effect</em> — that's the read-only
       investigator (read + verify, no write), no separate permission mode.</p>`,
   },

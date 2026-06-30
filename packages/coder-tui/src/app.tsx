@@ -3,11 +3,13 @@
 // COLLAPSE into one row showing its verdict when it finishes (bracketed by phase.start/end from
 // the engine). Arrow keys navigate nodes; Enter expands/collapses a group. Each tab shows the live
 // CPU/RSS of the command it's running. The engine is unchanged — this renders its ServerEvent stream.
+import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ChoicePreview, ClarifyQuestion } from "coder-core";
+import { type ChoicePreview, type ClarifyQuestion, createWorktree, hasUncommittedChanges, reapWorktree } from "coder-core";
 import { Box, render, Text, useApp, useInput, useStdout } from "ink";
 import { useEffect, useRef, useState } from "react";
-import { fmtBytes, Ledger, type Posture, type Provider, runOnce, sampleByPgid } from "coder-server";
+import { ensureCatalog, fmtBytes, Ledger, type LedgerRollup, listModels, lookupModel, type Posture, type Provider, refreshProjectFacts, renderFacts, runOnce, sampleByPgid } from "coder-server";
+import { writeUserConfig } from "./userConfig.ts";
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 type History = Awaited<ReturnType<typeof runOnce>>["messages"];
@@ -36,6 +38,11 @@ export type Node = UserNode | MsgNode | ToolNode | GroupNode;
 
 interface Session {
   id: string;
+  root: string; // working dir for this tab's runs — the primary clone, or this tab's own worktree
+  branch?: string; // branch name when this tab has its own worktree (shown in the status line)
+  isWorktree: boolean; // true when this tab runs in an isolated worktree we created
+  wtPending?: boolean; // worktree creation in flight — input is locked until it lands
+  wtError?: string; // worktree creation failed; the tab fell back to the primary tree
   nodes: Node[];
   sel: number; // selected node index in nav mode, -1 = none (live tail)
   nav: boolean; // arrows navigate the transcript (Esc) vs browse input history (default)
@@ -70,14 +77,21 @@ export interface InkChatOptions {
   modelId?: string;
   provider?: Provider;
   permissionMode?: Posture;
+  /** Called when a tab creates a worktree, so the caller can smart-reap them on exit. */
+  onWorktree?: (wt: { path: string; branch: string; base?: string }) => void;
 }
 
 let seq = 0;
-function newSession(sandbox: "host" | "docker"): Session {
+function newSession(sandbox: "host" | "docker", root: string, wt?: { isWorktree?: boolean; pending?: boolean }): Session {
   seq += 1;
   return {
     id: `s${seq}`,
-    nodes: [], // empty — the keybind hint renders as a non-navigable placeholder
+    root,
+    isWorktree: wt?.isWorktree ?? false,
+    wtPending: wt?.pending ?? false,
+    // A worktree tab opens with a status row so its creation is visible, not silent. A plain tab is
+    // empty — the keybind hint renders as a non-navigable placeholder.
+    nodes: wt?.pending ? [{ kind: "tool", text: "⟳ creating an isolated worktree for this tab…" }] : [],
     sel: -1,
     nav: false,
     history: undefined,
@@ -103,14 +117,22 @@ const openGroup = (nodes: Node[]): number => {
   return -1;
 };
 
-function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.Element {
+function App({ root, modelId: initialModelId, provider, permissionMode, onWorktree }: InkChatOptions): JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const rows = stdout.rows ?? 24;
   const cols = stdout.columns ?? 80;
 
-  const [sessions, setSessions] = useState<Session[]>(() => [newSession("host")]);
+  // The first tab follows the same model as every other: its own isolated worktree, so the agent
+  // never operates directly on your live checkout. spawnWorktree (fired on mount) fills in its root,
+  // and falls back in-place if a worktree can't be made (non-git dir, or launched inside a worktree).
+  const [sessions, setSessions] = useState<Session[]>(() => [newSession("host", root, { isWorktree: true, pending: true })]);
+  const [modelId, setModelId] = useState(initialModelId); // mutable so /model switches it live
   const [active, setActive] = useState(0);
+  // A mid-turn MCP auth prompt: { server, resolve } while waiting for the user's y/n.
+  const [authPrompt, setAuthPrompt] = useState<{ server: string; resolve: (ok: boolean) => void } | null>(null);
+  const authBusy = useRef(false); // one auth prompt at a time
+  const declinedAuth = useRef(new Set<string>()); // servers the user said no to — don't re-ask this session
   const [frame, setFrame] = useState(0);
   const [blink, setBlink] = useState(false);
   const [, bumpTick] = useState(0); // 1s re-render while a timed proposal counts down
@@ -135,6 +157,9 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
       }
       return { ...s, nodes };
     });
+
+  // Push a standalone message into a tab — used by the zero-token slash commands below.
+  const note = (id: string, text: string): void => patch(id, (s) => ({ ...s, nodes: [...s.nodes, { kind: "msg", text }] }));
 
   const anyRunning = sessions.some((s) => s.running);
   useEffect(() => {
@@ -194,6 +219,32 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
     return () => clearInterval(t);
   }, [modalUp]);
 
+  // Create this tab's isolated worktree off the primary clone, then point the tab at it. On failure
+  // (not a git repo, or coder was launched inside a linked worktree) fall back to the primary tree so
+  // the tab still works — with a visible note rather than a silent surprise.
+  const spawnWorktree = async (id: string): Promise<void> => {
+    try {
+      const dirtyPrimary = await hasUncommittedChanges(root); // branched off HEAD — won't include in-flight edits
+      const wt = await createWorktree(root);
+      onWorktree?.(wt);
+      const notes: Node[] = [{ kind: "tool", text: `✓ worktree ready — branch ${wt.branch} · ${wt.path}` }];
+      if (dirtyPrimary) notes.push({ kind: "tool", text: "note: your checkout has uncommitted changes — this tab works off HEAD and won't include them" });
+      patch(id, (s) => ({ ...s, root: wt.path, branch: wt.branch, wtPending: false, nodes: [...s.nodes, ...notes] }));
+    } catch (err) {
+      const msg = asMsg(err);
+      patch(id, (s) => ({ ...s, root, isWorktree: false, wtPending: false, wtError: msg, nodes: [...s.nodes, { kind: "tool", text: `✗ worktree failed (${msg}) — using the primary working tree` }] }));
+    }
+  };
+
+  // Bootstrap the first tab's worktree once on mount (the ref guards against a double-run).
+  const bootstrapped = useRef(false);
+  useEffect(() => {
+    if (bootstrapped.current) return;
+    bootstrapped.current = true;
+    void spawnWorktree(sessions[0].id);
+    // biome-ignore lint/correctness/useExhaustiveDependencies: one-shot bootstrap; deps would re-fire it
+  }, []);
+
   const runTurn = async (id: string, text: string): Promise<void> => {
     patch(id, (s) => ({ ...s, nodes: [...s.nodes, { kind: "user", text }], running: true, sel: -1, nav: false, inputHistory: [...s.inputHistory, text], histIdx: -1 }));
     const session = sessions.find((s) => s.id === id);
@@ -201,13 +252,20 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
     acs.current.set(id, ac);
     const res = await runOnce({
       task: text,
-      root,
+      root: session?.root ?? root,
       modelId,
       provider,
       permissionMode,
       sandbox: session?.sandbox ?? "host",
       history: session?.history,
       signal: ac.signal,
+      confirmMcpAuth: (server) =>
+        new Promise<boolean>((resolve) => {
+          // Don't re-nag a server declined this session, and only one prompt at a time.
+          if (declinedAuth.current.has(server) || authBusy.current) return resolve(false);
+          authBusy.current = true;
+          setAuthPrompt({ server, resolve });
+        }),
       onCommand: (pgid) => (pgid ? pgids.current.set(id, pgid) : pgids.current.delete(id)),
       emit: (e) => {
         if (e.type === "phase.start") patch(id, (s) => ({ ...s, nodes: [...s.nodes, { kind: "group", label: e.label, tools: [], verdict: "", running: true, collapsed: false }] }));
@@ -269,8 +327,27 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
   const submit = async (id: string, raw: string): Promise<void> => {
     const text = raw.trim();
     if (!text) return;
-    if (text === "/exit") return exit();
+    if (sessions.find((s) => s.id === id)?.wtPending) return; // worktree still being created — input is locked
+    if (text === "/exit" || text === "/quit") return exit();
     if (text === "/sandbox") return patch(id, (s) => ({ ...s, sandbox: s.sandbox === "host" ? "docker" : "host" }));
+    // Zero-token slash commands (no model call). Each tab reads from its own worktree root.
+    const sroot = sessions.find((s) => s.id === id)?.root ?? root;
+    if (text === "/stats") return note(id, formatStatsPlain(await new Ledger(join(sroot, ".coder", "ledger.jsonl")).rollup()));
+    if (text === "/facts") return note(id, renderFacts(await refreshProjectFacts(sroot)) || "no toolchains detected");
+    if (text === "/models") {
+      await ensureCatalog();
+      const list = listModels(catalogKey(provider));
+      return note(id, list.length ? formatModels(list, modelId) : "catalog unavailable (offline?) — switch anyway with /model <id>");
+    }
+    if (text === "/model" || text.startsWith("/model ")) {
+      const idArg = text.slice(6).trim();
+      if (!idArg) return note(id, `current model: ${modelId ?? "tier default"}`);
+      setModelId(idArg);
+      await writeUserConfig({ model: idArg });
+      await ensureCatalog();
+      const info = lookupModel(catalogKey(provider), idArg);
+      return note(id, `→ ${idArg} (${info?.cost ? `$${info.cost.input}/$${info.cost.output} per 1M` : "not in catalog — pricing falls back"}) · saved`);
+    }
     await runTurn(id, text);
   };
 
@@ -298,7 +375,13 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
   useInput((char, key) => {
     const cur = sessions[active];
     if (!cur) return;
-    if (key.ctrl && char === "t") return setSessions((ss) => [...ss, newSession(cur.sandbox)]), setActive(sessions.length);
+    if (key.ctrl && char === "t") {
+      const s = newSession(cur.sandbox, root, { isWorktree: true, pending: true });
+      setSessions((ss) => [...ss, s]);
+      setActive(sessions.length);
+      void spawnWorktree(s.id);
+      return;
+    }
     if (key.ctrl && char === "w") {
       if (sessions.length === 1) return exit();
       acs.current.get(cur.id)?.abort();
@@ -308,9 +391,26 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
     if (key.ctrl && char === "n") return setActive((a) => (a + 1) % sessions.length);
     if (key.ctrl && char === "p") return setActive((a) => (a - 1 + sessions.length) % sessions.length);
     if (key.ctrl && char === "c") {
+      if (authPrompt) {
+        authPrompt.resolve(false); // unblock the awaiting run before aborting
+        authBusy.current = false;
+        setAuthPrompt(null);
+      }
       if (cur.running) acs.current.get(cur.id)?.abort();
       else exit();
       return;
+    }
+    // A mid-turn MCP auth prompt takes over input until answered: y authorizes, n/Esc declines.
+    if (authPrompt) {
+      const settle = (ok: boolean) => {
+        if (!ok) declinedAuth.current.add(authPrompt.server);
+        authPrompt.resolve(ok);
+        authBusy.current = false;
+        setAuthPrompt(null);
+      };
+      if (char === "y" || char === "Y") settle(true);
+      else if (key.escape || char === "n" || char === "N") settle(false);
+      return; // swallow other keys while deciding
     }
     // Structured clarification takes over input: ↑/↓ pick, a–d / Enter select + advance, Esc cancels.
     if (cur.questions?.length) {
@@ -337,7 +437,7 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
     // Sign-off: bare y/n when a result awaits a verdict and the input is empty.
     if (cur.pending && !cur.running && !cur.input && !cur.nav && (char === "y" || char === "n")) {
       const accepted = char === "y";
-      void new Ledger(join(root, ".coder", "ledger.jsonl")).recordVerdict(cur.pending, accepted ? "accepted" : "rejected");
+      void new Ledger(join(cur.root, ".coder", "ledger.jsonl")).recordVerdict(cur.pending, accepted ? "accepted" : "rejected");
       return patch(cur.id, (s) => ({ ...s, pending: undefined, nodes: [...s.nodes, { kind: "msg", text: `signed off: ${accepted ? "accepted ✓" : "rejected ✗"}` }] }));
     }
     if (key.return) {
@@ -388,6 +488,9 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
   // ephemeral subagent tokens spent this session (the cost of isolation, which never persists).
   const ctx = ` · ctx prime ${k(cur.prime)}${cur.subagentTotal > 0 ? ` · sub ${k(cur.subagentTotal)}` : ""}`;
   const usage = cur.cpu > 0 || cur.rss > 0 ? ` · ${cur.cpu.toFixed(0)}% cpu ${fmtBytes(cur.rss)}` : "";
+  // Where this tab is working: the primary clone, or its own worktree branch — plus the actual CWD.
+  const place = cur.wtPending ? "creating worktree…" : cur.isWorktree ? `wt:${cur.branch ?? "?"}` : "primary";
+  const cwd = clip(shortPath(cur.root), 48);
 
   return (
     <Box flexDirection="column" height={rows - 1} width={cols}>
@@ -400,7 +503,7 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
       </Box>
       <Box flexDirection="column" flexGrow={1}>
         {shown.length === 0 ? (
-          <Text color="gray">Enter to send · Esc → navigate (↑/↓ scroll, Enter expand) · ↑/↓ history · Ctrl-T tab · Ctrl-N/P switch · /sandbox · /exit</Text>
+          <Text color="gray">Enter to send · Esc → navigate (↑/↓ scroll, Enter expand) · ↑/↓ history · Ctrl-T new tab + worktree · Ctrl-N/P switch · /models /stats /facts /sandbox · /exit</Text>
         ) : (
           shown.map((r, i) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: sliced, append-only rows
@@ -411,18 +514,24 @@ function App({ root, modelId, provider, permissionMode }: InkChatOptions): JSX.E
       <Box>
         <Text color="gray">
           {cur.running ? `${SPIN[frame]} ` : ""}
-          {modelId ?? "model"} · {cur.sandbox} · ${cur.cost.toFixed(4)}
+          {modelId ?? "model"} · {cur.sandbox} · {place} · {cwd} · ${cur.cost.toFixed(4)}
           {ctx}
           {usage}
           {cur.nav ? " · [NAV] ↑/↓ move · Enter expand · Esc exit" : ""}
         </Text>
       </Box>
       <Box>
-        <Text color={cur.pending && !cur.running ? "yellow" : undefined}>
-          {cur.pending && !cur.running ? "✓ accept? (y/n) › " : "› "}
-          {cur.input}
-        </Text>
-        <Text color="gray">{cur.running ? "" : "▏"}</Text>
+        {authPrompt ? (
+          <Text color="cyan" bold>{`🔑 Authorize "${authPrompt.server}" in your browser? (y/n)`}</Text>
+        ) : (
+          <>
+            <Text color={cur.pending && !cur.running ? "yellow" : undefined}>
+              {cur.pending && !cur.running ? "✓ accept? (y/n) › " : "› "}
+              {cur.input}
+            </Text>
+            <Text color="gray">{cur.running ? "" : "▏"}</Text>
+          </>
+        )}
       </Box>
     </Box>
   );
@@ -781,12 +890,63 @@ function preview(args: unknown): string {
 function fmtMs(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
+function asMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+/** models.dev catalog key for a provider (where pricing/model lists are indexed). */
+const catalogKey = (p?: Provider): string => (p === "anthropic" ? "anthropic" : p === "azure" ? "azure" : "google-vertex");
+/** The ledger rollup as plain text for a `/stats` message node (no ANSI — the TUI styles it). */
+function formatStatsPlain(r: LedgerRollup): string {
+  const v = r.verdicts;
+  const signed = v.accepted + v.rejected + v.abandoned;
+  const rate = signed ? `${Math.round((100 * v.accepted) / signed)}% accepted of ${signed} signed` : "none signed off yet";
+  const mins = r.toolMs >= 60_000 ? `${(r.toolMs / 60_000).toFixed(1)}m` : `${Math.round(r.toolMs / 1000)}s`;
+  const timeouts = r.timeouts > 0 ? ` · ${r.timeouts} timeout${r.timeouts > 1 ? "s" : ""}` : "";
+  return [
+    `${r.tasks} tasks · $${r.costUsd.toFixed(4)} · ${r.opHits} op-hits · ~${r.tokensAvoided} tok avoided`,
+    `verdicts: ${v.accepted} accepted · ${v.rejected} rejected · ${v.abandoned} abandoned · ${v.unknown} unknown  (${rate})`,
+    `avg effort: ${r.avgTurns.toFixed(1)} turns · ${r.avgToolCalls.toFixed(1)} tool calls · ${mins} in tools${timeouts}`,
+  ].join("\n");
+}
+/** Catalog model list as plain text for a `/models` message node; marks the active model. */
+function formatModels(list: ReturnType<typeof listModels>, current?: string): string {
+  const rows = list.slice(0, 25).map((m) => `${m.id === current ? "● " : "  "}${m.id}  ${m.cost ? `$${m.cost.input}/$${m.cost.output} per 1M` : ""}`.trimEnd());
+  const more = list.length > 25 ? ` (showing 25 of ${list.length})` : "";
+  return `${rows.join("\n")}\nswitch with /model <id>${more}`;
+}
+/** Home-relativize a path for the status line (so `~/.coder/worktrees/…` reads cleanly). */
+function shortPath(p: string): string {
+  const home = homedir();
+  return p === home || p.startsWith(`${home}/`) ? `~${p.slice(home.length)}` : p;
+}
 
 export async function runInkChat(opts: InkChatOptions): Promise<void> {
+  const created: { path: string; branch: string; base?: string }[] = [];
   process.stdout.write("\x1b[?1049h\x1b[H");
   try {
-    await render(<App {...opts} />).waitUntilExit();
+    await render(<App {...opts} onWorktree={(wt) => created.push(wt)} />).waitUntilExit();
   } finally {
     process.stdout.write("\x1b[?1049l");
+  }
+  // Reap every tab worktree: always remove the DIRECTORY (it's just clutter), keep the BRANCH when it
+  // holds work — committing any uncommitted changes as a WIP snapshot first so nothing is lost. An
+  // untouched tab leaves nothing behind; a tab that did work leaves a reviewable coder/wt-* branch.
+  const keptBranches: string[] = [];
+  const stuck: typeof created = []; // couldn't be removed (e.g. no git identity) — reported, not lost
+  let dropped = 0;
+  for (const wt of created) {
+    const r = await reapWorktree(opts.root, wt);
+    if (!r.removed) stuck.push(wt);
+    else if (r.branchKept) keptBranches.push(wt.branch + (r.committed ? " (WIP committed)" : ""));
+    else dropped += 1;
+  }
+  if (dropped) process.stderr.write(`\n[coder] removed ${dropped} untouched tab worktree${dropped > 1 ? "s" : ""}.\n`);
+  if (keptBranches.length) {
+    process.stderr.write(`${dropped ? "" : "\n"}[coder] worktree removed; work kept on ${keptBranches.length} branch${keptBranches.length > 1 ? "es" : ""} — review with \`git -C ${opts.root} log <branch>\`, merge or \`git -C ${opts.root} branch -D\` to discard:\n`);
+    for (const b of keptBranches) process.stderr.write(`  ${b}\n`);
+  }
+  if (stuck.length) {
+    process.stderr.write(`${dropped || keptBranches.length ? "" : "\n"}[coder] ${stuck.length} worktree${stuck.length > 1 ? "s" : ""} could not be auto-removed (kept intact):\n`);
+    for (const wt of stuck) process.stderr.write(`  ${wt.branch} · ${wt.path}\n`);
   }
 }

@@ -3,7 +3,7 @@
 // posture preset or per-tool override tightens it, and config files + bash command
 // patterns layer on later (see docs/PLAN.md + TODOS). The protocol's PermissionMode
 // (auto | ask | deny) is the per-decision outcome.
-import type { PermissionMode } from "coder-core";
+import type { Effect, PermissionMode } from "coder-core";
 import { TOOL_EFFECTS } from "../agent/tools.ts";
 
 /** Posture preset — the baseline before per-tool/config overrides. */
@@ -16,6 +16,9 @@ export interface PermissionConfig {
   mode?: Posture;
   /** Per-tool overrides (tool name → mode) — win over the posture. */
   tools?: Record<string, PermissionMode>;
+  /** Effects for tools outside the built-in `TOOL_EFFECTS` (operations, MCP tools) — so they're
+   *  gated by their declared effect instead of falling through to always-allow. */
+  effects?: Map<string, Effect>;
 }
 
 /** Posture → default mode per effect. `verify` (running the project's checks) is diagnosis, not
@@ -58,10 +61,10 @@ export class PermissionPolicy {
     // `remember`/`declare_command` write .coder/ metadata (patterns + runnable commands), not user
     // source. Keep them frictionless (never prompt) — but still denied in plan/read-only.
     if (tool === "remember" || tool === "declare_command") return this.modes.write === "deny" ? "deny" : "auto";
-    const effect = TOOL_EFFECTS[tool];
+    const effect = TOOL_EFFECTS[tool] ?? this.config.effects?.get(tool); // built-in, else op/MCP effect
     if (effect === "write") return this.modes.write;
     if (effect === "verify") return this.modes.verify;
     if (effect === "read") return this.modes.read;
-    return "auto"; // deterministic operation tools / unknown — allow
+    return "auto"; // no declared effect — allow (deterministic operation tools)
   }
 }
