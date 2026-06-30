@@ -99,11 +99,48 @@
     "note": "Full[Advanced] — staff+: introduce currency as first-class (Money + currency guards) and migrate money + cart while preserving format_usd."
   },
   {
-    "id": "go-failing-test",
+    "id": "go-question",
     "project": "go-stdlib",
-    "prompt": "A unit test is failing. Find the bug and fix it so the tests pass.",
+    "prompt": "Which file in the store package formats currency, and what is the exact name of the function it exports for that? Answer; don't change anything.",
+    "expect": ["money", "FormatUSD"],
+    "expectNoChange": true,
+    "note": "Question: answer from the code, read-only."
+  },
+  {
+    "id": "go-investigation",
+    "project": "go-stdlib",
+    "prompt": "Customers report that large orders (around $500 and up) silently fail — the order doesn't go through and they see no error. Investigate using the available logs and the operational database, and report the root cause: what rejects these orders, and at what configured limit? This is an INVESTIGATION ONLY — do NOT modify any files; just report your diagnosis.",
+    "setup": "sqlite3 ops/app.db < ops/seed.sql",
+    "needs": ["sqlite3"],
+    "expect": ["max_order_cents", "50000"],
+    "expectNoChange": true,
+    "note": "Investigation: correlate the app log + a DB config row + order.go via the declared app-logs/db-query commands. Diagnose-only."
+  },
+  {
+    "id": "go-full-simple",
+    "project": "go-stdlib",
+    "prompt": "A unit test is failing. Find the root cause and fix it so the tests pass.",
+    "seed": "cp _seeds/money_bug.go store/money.go",
     "needs": ["go"],
     "verify": "go test ./...",
-    "note": "Exercises: go toolchain detection, package-scoped single-test iteration (go test -run), and a real source fix. Skips when `go` isn't installed."
+    "note": "Full[Simple]: isolated one-file bug fix; package-scoped single-test iteration (go test -run)."
+  },
+  {
+    "id": "go-full-moderate",
+    "project": "go-stdlib",
+    "prompt": "Add stacking discount codes to the store package. A `DiscountCode` is either a percentage off (Kind \"percent\") or a fixed cents amount (Kind \"fixed\"); several can apply. Implement `ApplyCodes(subtotalCents int, codes []DiscountCode) int` that applies them IN ORDER to a running total — percent codes take that percent off the current total (clamp a percent above 100 to 100, never negative; round to the nearest cent), fixed codes subtract cents, and the total never drops below 0. Also add `CartTotalAfterCodes(items []LineItem, codes []DiscountCode) int` over the cart subtotal. A test spec (discount_test.go) defines the exact rules and edge cases.",
+    "seed": "cp _seeds/discount_test.go store/discount_test.go",
+    "needs": ["go"],
+    "verify": "go test ./...",
+    "note": "Full[Moderate] — mid-level barely: discount engine with order-dependent stacking, 0 floor, percent clamp, cent rounding, cart wiring."
+  },
+  {
+    "id": "go-full-advanced",
+    "project": "go-stdlib",
+    "prompt": "Make the store package currency-aware. Introduce a `Money` value type (cents + currency) with `MoneyOf(cents int, currency string) Money`, `Add`, `Subtract` (returning an error on different currencies — no implicit conversion), and `Format()` — currency-aware (USD -> \"$12.99\", EUR -> \"€12.99\"). Then migrate: `FormatUSD` keeps its exact existing output, `LineItem` gains a `Currency`, and `CartSubtotal(items []LineItem) (Money, error)` returns a Money in the cart's currency (a mixed-currency cart returns an error). Test specs (money_currency_test.go and a rewritten cart_test.go) define the contract; existing behavior must stay green.",
+    "seed": "cp _seeds/money_currency_test.go store/money_currency_test.go && cp _seeds/cart_currency_test.go store/cart_test.go",
+    "needs": ["go"],
+    "verify": "go test ./...",
+    "note": "Full[Advanced] — staff+: introduce currency as first-class (Money + currency guards via Go error returns) and migrate money + cart while preserving FormatUSD."
   }
 ]
