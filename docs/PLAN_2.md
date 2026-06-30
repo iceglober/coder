@@ -102,8 +102,12 @@ Incomplete but worth doing, grouped the same way as [PLAN_1.md](./PLAN_1.md). Th
 
 Recorded so the decision stays made.
 
-- **Worktree create/remove + drift watcher.** glrs owns worktree lifecycle; coder operates
-  *inside* a worktree someone else made. Keep only a small **nested-clone guard** at startup.
+- **Worktree create/remove — REVERSED (now built).** Originally cut to glrs. Reversed because coder
+  needs *self-contained* isolated runs — a throwaway branch per run via `coder --worktree`, and the eval
+  harness runs each task in its own worktree — and neither should depend on glrs being present.
+  `createWorktree`/`removeWorktree`/`assertPrimaryClone` (the nested-clone guard) live in
+  `coder-core/src/worktree.ts` (plain `git worktree`, no glrs import). The **drift watcher** + per-worktree
+  container/tmux pinning stay cut (revisit on demand).
 - **A `Forge` adapter registry** (github/gitlab/… adapters). Superseded by *configuration over
   enumeration* — the repo declares a `checks` command; coder stays forge-agnostic and maintains
   no vendor zoo.

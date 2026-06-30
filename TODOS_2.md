@@ -29,7 +29,8 @@ records what we deliberately won't build.
 ## Measurement
 
 - ⬜ **Surface a failed gate**: when `checks.tests:"fail"` or typecheck fails, say so rather than present "done" over a red gate.
-- ⬜ **Close the verdict loop**: behavior backfill (acted-on / moved-on = accepted; rephrased / pushed-back = rejected) + the rollup join — verdict-rate *by effort*.
+- ⬜ **Give coder sight** (Phase 2 stretch): a headless render/screenshot capability for web UI so visual/UX changes self-verify instead of relying on the user's eyes. New dependency + sandbox work; declared/stack-neutral where possible. The prompt-side "say it's unverified" honesty already shipped.
+- ⬜ **Close the verdict loop**: the rejection STEER shipped (a rejection now changes the next turn — see TODOS_1). Remaining: **behavioral backfill** (infer accept/reject from the next turn — moved-on = accepted, new-problem-same-artifact = rejected — so verdicts are free, no keypress); the rollup join (verdict-rate *by effort*); file-scoped cross-turn thrash; recording a rejected approach as an anti-pattern.
 - ⬜ **Interactive Ctrl-C test**: the abandoned-on-bail path can't be exercised by piping a fake Ctrl-C.
 
 ## Context
@@ -50,10 +51,10 @@ records what we deliberately won't build.
 *New (yours) — ✅ subagent collapse + message navigation + styled verdicts shipped as the transcript tree (see TODOS_1); remaining:*
 - ⬜ **Multi-line input** *(new)*: Shift+Return inserts a newline; prompts send on Cmd+Return (so plain Return can be the newline).
 - ⬜ **Command palette** *(new keybind)*: the `/`-palette opens on Ctrl+P (or Cmd+Shift+P / Cmd+K).
-- ⬜ **Styling depth**: the transcript tree does inline `**bold**`; extend to code blocks, the `checked/reasoned/guess` tags, and `file:line` refs colored.
+- ✅ **Markdown verdicts + gutters** shipped (see TODOS_1). Remaining styling depth: color the `checked/reasoned/guess` tags + `file:line` refs; span-aware wrapping for bold/code that wraps mid-span.
 
 *Existing:*
-- 🟡 **TUI iteration**: markdown rendering (assistant gutter + code blocks), scrollback depth (a real scroll offset, not just tail), persistent status-bar footer (cost + context-fill live).
+- 🟡 **TUI iteration**: markdown + gutters done; remaining — scrollback depth (a real scroll offset, not just nav-tail), persistent status-bar footer (cost + context-fill live), and **Path B** (bordered `<Box>` cards + an Ink-owned scroll viewport — the bigger refactor off the "1 row = 1 line" model).
 - ⬜ **Remote transport** (low priority — in-process is the daily driver): reconnect-on-drop, inline approvals over `--connect`, `tool.delta` (meaningless until a tool *streams* output).
 - ⬜ **Host↔sandbox handshake**: when the docker sandbox is adopted for untrusted work — the sandbox reaches exactly one privileged thing (the model endpoint) via the host. The piece that makes isolation genuinely credential-safe.
 

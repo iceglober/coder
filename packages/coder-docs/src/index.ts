@@ -1,170 +1,167 @@
-// coder-docs — a dependency-free docs site organized around coder's core concepts/abstractions.
-// `bun run packages/coder-docs/src/index.ts` (or `bun run dev`) serves it on CODER_DOCS_PORT
-// (default 4180). Concepts live in SECTIONS; a live Build-status section reads TODOS.md.
+// coder-docs — a dependency-free concept guide for coder. `bun run packages/coder-docs/src/index.ts`
+// (or `bun run dev`) serves it on CODER_DOCS_PORT (default 4180). Concepts live in SECTIONS; a live
+// Build-status section is parsed from TODOS_1.md + TODOS_2.md on each request.
 import { join } from "node:path";
 
 interface Section {
   id: string;
   title: string;
-  /** Trusted HTML (authored here, not user input). */
+  /** One-line definition shown under the heading. */
+  lead: string;
+  /** Trusted HTML body (authored here, not user input). */
   html: string;
 }
 
-// Each section is one concept: what it is, why it exists, how it works.
+// Each concept: a one-line definition (lead), then how/why in a few tight points.
 const SECTIONS: Section[] = [
   {
-    id: "overview",
-    title: "Overview",
-    html: `<p><strong>coder</strong> is a coding agent built on one bet: <em>prefer computation to inference, and treat
-      context as a budget</em>. Long context degrades every model's accuracy (not just its cost), so coder keeps what's
-      in front of the model short and relevant, computes facts deterministically wherever it can, and spends tokens only
-      where a model genuinely adds value.</p>
-      <p>The sections below are the concepts that fall out of that bet. Read them as the tool's mental model, not a manual.</p>`,
+    id: "thesis",
+    title: "The bet",
+    lead: "Long context makes models less accurate — not just pricier. So keep it short.",
+    html: `<p>That one finding drives everything. coder spends tokens only where a model genuinely adds value, and
+      <em>computes</em> the rest. It keeps what's in front of the model short and relevant — for accuracy first,
+      cost second. Everything below is a consequence of that bet.</p>`,
   },
   {
-    id: "operations",
-    title: "Operations",
-    html: `<p>The core primitive. An <strong>operation</strong> is plain code: input → structured output, <em>no model
-      call</em>. Where a fact can be computed — the state of a repo, where a symbol is defined, which package manager a
-      project uses — coder computes it instead of asking the model. Faster, cheaper, and exact.</p>
-      <p>Each operation declares an <strong>effect</strong> (read / verify / write) and one or more <strong>surfaces</strong>:
-      a slash command, a tool the model can call, a filter applied to a noisy tool's output, or a direct route from intent.
-      "Compute over inference" is not a slogan here — it's this primitive, used everywhere it fits.</p>`,
-  },
-  {
-    id: "tools",
-    title: "Tools",
-    html: `<p>The agent's hands — read and edit files, search, run commands. Every tool declares an <strong>effect</strong>:</p>
+    id: "capabilities",
+    title: "Capabilities",
+    lead: "One model: a few native tools, plus a dispatcher over a described catalog.",
+    html: `<p>Everything coder can do is a <strong>capability</strong> — a named action, args → result, tagged with an
+      <strong>effect</strong> (<code>read</code> / <code>verify</code> / <code>write</code>). What differs is only how
+      it's <em>implemented</em> and how it's <em>provided</em> to the model — and that split is driven by tokens: a tool's
+      definition sits in context on every request, so more tools mean more tokens <em>and</em> worse selection. So
+      capabilities live on two surfaces:</p>
       <ul>
-        <li><strong>read</strong> — <code>read_file</code>, <code>grep</code>, <code>glob</code>, <code>list_dir</code>, <code>git_state</code>, <code>find_def</code></li>
-        <li><strong>verify</strong> — <code>script</code> (runs the project's real checks via its toolchain; no source edits)</li>
-        <li><strong>write</strong> — <code>write_file</code>, <code>edit_file</code>, <code>bash</code> (arbitrary execution)</li>
+        <li><strong>Native tools</strong> — the hot path, always present with full schemas:
+          <code>read_file</code>, <code>edit_file</code>, <code>grep</code>, <code>bash</code>, plus deterministic
+          <em>operations</em> like <code>git_state</code> and <code>find_def</code> (plain code, no model call). A small
+          set the model uses every turn.</li>
+        <li><strong>A dispatcher + catalog</strong> — the long tail, provided cheaply. One <code>script(task, args)</code>
+          tool, and a compact catalog the model picks from <em>by intent</em>:</li>
       </ul>
-      <p>A subagent's capability is just a <em>filtered view of the tools by effect</em>. That's how the read-only
-      investigator is defined — read + verify, no write — without a separate permission mode. Output is truncated inside
-      each tool so noisy results never bloat context.</p>`,
+      <pre><code>script(name, {args}) — pick the one whose description fits:
+- test · lint · build              (computed from the toolchain)
+- pr-checks(pr) — list a PR's CI status     (declared → runs \`gh pr checks\`)
+- test-db — stand up the test database      (declared)</code></pre>
+      <p>A catalog line costs ~24 tokens; the same thing as a native tool is 60+, and a typical MCP tool 550–1,400.
+      So a toolchain task, a project command, and (later) an MCP tool are all just catalog entries the dispatcher routes
+      to — different implementations, one cheap surface. If the model gets the args wrong, the dispatcher replies with the
+      exact usage. A subagent's role is just a <em>filtered view of capabilities by effect</em> — that's the read-only
+      investigator (read + verify, no write), no separate permission mode.</p>`,
   },
   {
-    id: "prompts",
-    title: "Prompts",
-    html: `<p>Behavior is shaped <em>structurally</em>, not by hoping. The <strong>charter</strong> sets the working rules
-      and the <strong>verdict standard</strong>: lead with the answer, point to the <code>file:line</code>, tag each claim
-      <em>checked / reasoned / guess</em>, and say what you did <em>not</em> check. An <strong>output contract</strong>
-      enforces calculated brevity.</p>
-      <p>Roles swap the charter for a focused mandate — the <strong>investigator</strong> prompt is "find the root cause,
-      stop when confirmed, don't edit." A prompt is a lever pulled deliberately, and its effect (e.g. verbosity) is measured,
-      not assumed.</p>`,
+    id: "filters",
+    title: "Filters",
+    lead: "Shrink a noisy capability's output before it reaches the model.",
+    html: `<p>A <code>test_summary</code> filter turns a 500-line test log into "3 failed, here's which" <em>before</em> it
+      enters context. Keeping intermediate results out of context is as valuable as keeping the catalog small — it's the
+      other half of the token budget.</p>`,
   },
   {
     id: "subagents",
     title: "Subagents",
-    html: `<p>coder decides per task — no user command. A cheap <strong>triage</strong> routes the task: <em>investigate</em>
-      vs <em>direct</em>. An investigation spawns a read-only <strong>investigator</strong> subagent in its <em>own
-      isolated context</em>: it finds the root cause and returns a compact <strong>verdict</strong> (cause with
-      <code>file:line</code>, evidence, the fix), never its 40-step transcript. An <strong>implementer</strong> then acts
-      on that verdict.</p>
-      <p>The orchestrator keeps only the distilled verdict — aggressive context protection — while passing a compact
-      <strong>working memory</strong> forward so references like "that PR" survive across turns.</p>`,
+    lead: "coder decides per task: investigate first, or act directly.",
+    html: `<p>A cheap <strong>triage</strong> routes the task. An investigation runs a read-only
+      <strong>investigator</strong> in its own isolated context — it finds the root cause and returns a compact
+      <strong>verdict</strong> (cause at <code>file:line</code>, evidence, the fix), never its 40-step transcript. An
+      <strong>implementer</strong> then acts on that verdict.</p>
+      <p>The orchestrator keeps only the verdict, and threads a compact <strong>working memory</strong> forward so "that
+      PR" survives across turns. Direct actions are isolated the same way — only the compact result reaches history,
+      never the tool transcript.</p>`,
   },
   {
     id: "context",
-    title: "Context management",
-    html: `<p>Context is a budget, held for <em>accuracy</em> as much as cost. The levers:</p>
-      <ul>
-        <li><strong>Compaction</strong> — long sessions summarize older turns into a compact note, keeping recent ones verbatim.</li>
-        <li><strong>Caching</strong> — the stable prefix is measured and priced at the cheaper <code>cache_read</code> rate.</li>
-        <li><strong>Data in tools, not prompts</strong> — e.g. project commands live in the <code>script</code> tool, so the prompt is a pointer, not a dump.</li>
-        <li><strong>Subagent isolation</strong> — exploration transcripts are discarded; only the verdict survives.</li>
+    title: "Context as a budget",
+    lead: "Held for accuracy as much as cost. Fewest, most-relevant tokens win.",
+    html: `<ul>
+        <li><strong>Compaction</strong> — older turns summarize; recent ones stay verbatim.</li>
+        <li><strong>Isolation</strong> — subagent exploration is discarded; only the verdict survives.</li>
+        <li><strong>Data in tools, not prompts</strong> — project commands live in the <code>script</code> tool; the prompt is a pointer.</li>
       </ul>
-      <p>The goal is always the fewest, most relevant tokens in front of the model.</p>`,
+      <p>The status line shows <strong>prime</strong> (your persistent context — small, compounding) vs <strong>sub</strong>
+      (ephemeral subagent tokens — the cost of isolation, which never persists).</p>`,
   },
   {
-    id: "permissions",
-    title: "Permissions",
-    html: `<p>A policy decides, per tool call: <strong>allow / ask / deny</strong> — keyed to the tool's effect. Postures
-      (the user's stance):</p>
-      <ul>
-        <li><code>auto</code> (default) — edits and commands run without asking.</li>
-        <li><code>ask</code> — prompts <code>[y/N]</code> before writes/commands.</li>
-        <li><code>auto-edit</code> — auto edits, ask before commands.</li>
-        <li><code>plan</code> — read-only; writes/commands denied.</li>
-      </ul>
-      <p>Reads are never gated. Posture is the <em>user's</em> policy on the acting agent — separate from a subagent's
-      role (which is a toolset).</p>`,
+    id: "knowledge",
+    title: "Project knowledge",
+    lead: "What coder knows about your repo — kept in .coder/, three distinct concerns.",
+    html: `<ul>
+        <li><strong>Config (computed)</strong> — detected <strong>toolchains</strong> (js, python; pluggable) from
+          lockfiles + manifests, so <code>script("test", path)</code> runs the right command for the toolchain that
+          governs that path. The npm-vs-pnpm class of error is gone; a monorepo path scopes to its package.</li>
+        <li><strong>Runbook (declared)</strong> — the project-specific capabilities in the catalog, each
+          <code>{ cmd, desc }</code>. coder picks them <em>by intent</em> from the description, so no command name ever
+          lives in a prompt:
+          <pre><code>"pr-checks": { "cmd": "gh pr checks {pr}", "desc": "list a PR's CI check status" }</code></pre>
+          It builds these by <strong>onboarding like a new dev</strong> — when it can't tell how to run something it asks,
+          then records the answer with <code>declare_command</code>.</li>
+        <li><strong>Memory (learned)</strong> — durable patterns it should reuse (see below).</li>
+      </ul>`,
   },
   {
-    id: "models",
-    title: "Models",
-    html: `<p>Tiers (<code>cheap/fast/mid/deep</code>) map to concrete models; <code>/model &lt;id&gt;</code> switches live
-      (persisted to <code>~/.coder/config.json</code>). Pricing comes from the public <a href="https://models.dev">models.dev</a>
-      catalog — cached, accurate per real model, and cache-aware (honors the &gt;200k-context tier).</p>
-      <p>The agentic loop runs <strong>non-streaming</strong> (the AI SDK's <code>ToolLoopAgent</code>): Gemini-3 is a
-      thinking model whose <em>thought signatures</em> carry reasoning between steps, and the streaming path mangles them
-      on multi-step tool use. Non-streaming round-trips them correctly.</p>`,
+    id: "patterns",
+    title: "Pattern memory",
+    lead: "Learn a project's patterns once; reuse them, never re-derive.",
+    html: `<p>coder records durable <strong>patterns</strong> — design, architecture, tooling, conventions — with the
+      <code>remember</code> tool. A pattern is a literal value or, better, a <strong>ref to live code</strong> — so it
+      stays current when the code changes and reuse keeps the codebase DRY. Patterns persist in
+      <code>.coder/facts.json</code> and inject as a compact <em>pointer index</em> each turn; the model reads a ref on
+      demand, never carrying its contents in context.</p>`,
   },
   {
-    id: "facts",
-    title: "Project facts",
-    html: `<p>coder <em>computes</em> how to run a repo's tasks rather than guessing (the npm-vs-pnpm class of error). It
-      detects <strong>toolchains</strong> (js, python; pluggable — adding a language is one detector) from markers like the
-      <code>packageManager</code> field, lockfiles, and <code>[tool.uv]</code>, and maps tasks to exact commands.</p>
-      <p>The <code>script(task, path)</code> tool runs a named task using the toolchain that <em>governs that path</em> —
-      the model names a task, never a binary. Results persist to <code>.coder/facts.json</code> (<code>{computed,
-      overrides}</code>; human overrides win). Remote CI is never assumed — local checks are universal; anything
-      stack-specific is a declared command, not a baked-in vendor.</p>`,
+    id: "clarification",
+    title: "Clarification",
+    lead: "When a task is ambiguous, coder asks — structured, never prose.",
+    html: `<p>Instead of guessing and sweeping, coder calls <code>ask_user</code> with 2–4 options and a recommended
+      default, rendered as an interactive modal. Options can carry a rich <strong>preview</strong> — color swatches, a
+      code snippet, a file tree, a chart. For a missing input it asks the delegation question — <em>have it · show me
+      options · you decide</em> (default) — and a proposal can carry a timeout that auto-takes the default if you step
+      away.</p>`,
   },
   {
     id: "verdicts",
-    title: "Verdicts",
-    html: `<p>coder does <em>not</em> grade its own correctness — no machine check tells you a task was done <em>right</em>.
-      The only correctness signal is the human's, <strong>borrowed</strong> via a one-key sign-off at the resolution event
-      (<code>accepted</code> / <code>rejected</code> / <code>abandoned</code> / <code>unknown</code>), never computed.</p>
-      <p>Machine checks (tests, typecheck) are <em>gates</em>, not scores. So coder's actual job is to make that "yes" cheap
-      to give: a conclusion written to be confirmed at a glance — which is exactly the verdict standard the charter enforces.</p>`,
+    title: "Verdicts & sign-off",
+    lead: "Correctness is borrowed from a human, never graded by the model.",
+    html: `<p>No machine check tells you a task was done <em>right</em>. The only correctness signal is your one-key
+      sign-off at the resolution event (<code>accepted</code> / <code>rejected</code> / <code>abandoned</code>). Tests and
+      typecheck are <strong>gates, not scores</strong> — and only count when they actually exercise the goal.</p>
+      <p>So coder's real job is to make that "yes" cheap: every conclusion is a <strong>verdict</strong> — lead with the
+      answer, evidence at <code>file:line</code>, claims tagged <em>checked / reasoned / guess</em>, and a plain statement
+      of what it did <em>not</em> check. A rejection <strong>pays off</strong>: it steers the next turn away from the
+      rejected approach, and after two it forces a change of strategy.</p>`,
   },
   {
     id: "receipts",
     title: "Receipts",
-    html: `<p>Every task writes one <strong>receipt</strong> to an append-only ledger: <strong>effort</strong> (turns, tool
-      calls, files read/written — all computed), <strong>cost</strong> + cached tokens, the model used, and the borrowed
-      <strong>verdict</strong>. <code>/stats</code> rolls them up — verdict mix, accepted-rate, average effort.</p>
-      <p>The ledger is the source of truth for the status view and for distillation. North star: <em>time-to-confirmed-resolution</em>,
-      trending down.</p>`,
+    lead: "One append-only receipt per task — effort, cost, and the borrowed verdict.",
+    html: `<p>Effort (turns, tool calls, files, time-in-tools) is <em>computed</em>; the verdict is <em>borrowed</em>.
+      <code>/stats</code> rolls them up — verdict mix, accepted-rate, average effort. The north star is
+      <strong>time-to-confirmed-resolution</strong>, trending down.</p>`,
+  },
+  {
+    id: "permissions",
+    title: "Permissions",
+    lead: "A policy decides allow / ask / deny per tool call, keyed to its effect.",
+    html: `<p>Postures: <code>auto</code> (default — edits and commands run), <code>ask</code> (prompt before writes /
+      commands), <code>auto-edit</code> (auto edits, ask commands), <code>plan</code> (read-only). Reads are never gated.
+      Posture is <em>your</em> stance on the acting agent — separate from a subagent's role, which is a toolset.</p>`,
+  },
+  {
+    id: "models",
+    title: "Models",
+    lead: "Multi-provider, priced from models.dev, run non-streaming.",
+    html: `<p>Gemini on Vertex (default) or Anthropic, through the Vercel AI SDK; <code>/model &lt;id&gt;</code> switches
+      live. Pricing is pulled from the public <a href="https://models.dev">models.dev</a> catalog — cached and
+      cache-aware. The loop runs <strong>non-streaming</strong>: Gemini-3's <em>thought signatures</em> carry reasoning
+      between steps, and the streaming path mangles them on multi-step tool use.</p>`,
   },
   {
     id: "distillation",
     title: "Distillation",
-    html: `<p>The self-improvement loop <em>(roadmap)</em>. The <strong>Distiller</strong> mines receipts for work the agent
-      keeps repeating and proposes a deterministic <strong>operation</strong> to replace it — turning inference coder paid
-      for once into computation it gets free forever. Proposals are replay-validated against recorded examples and earn
-      trust from evidence, not assertion.</p>
-      <p>It closes the loop: the same "compute over inference" thesis, applied by coder to its own history.</p>`,
-  },
-  {
-    id: "run",
-    title: "Running it",
-    html: `<pre><code>export GOOGLE_VERTEX_PROJECT=&lt;gcp-project&gt;
-bun bin/coder                 # interactive chat (in-process, default)
-bun bin/coder --once "&lt;task&gt;" # one task, then exit
-bun bin/coder --serve         # host an HTTP/SSE server
-bun bin/coder --connect &lt;url&gt; # attach to a running server</code></pre>
-      <p>Chat commands: <code>/model</code> · <code>/models</code> · <code>/facts</code> · <code>/stats</code> ·
-      <code>/y</code> <code>/n</code> <code>/skip</code> (sign-off) · <code>/exit</code> (Ctrl-C = abandon the last result).
-      Packages: <code>coder-core</code> (types + event log), <code>coder-server</code> (engine), <code>coder-tui</code>
-      (the command), <code>coder-docs</code> (this page).</p>`,
-  },
-  {
-    id: "palette",
-    title: "Palette",
-    html: `<p>The site's full Pantone Color of the Year collection:</p>
-      <div style="display:flex; gap:8px;">
-        <div style="width:32px; height:32px; border-radius:4px; background:var(--pantone-2024-peach-fuzz)" title="Peach Fuzz"></div>
-        <div style="width:32px; height:32px; border-radius:4px; background:var(--pantone-2023-viva-magenta)" title="Viva Magenta"></div>
-        <div style="width:32px; height:32px; border-radius:4px; background:var(--pantone-2022-very-peri)" title="Very Peri"></div>
-        <div style="width:32px; height:32px; border-radius:4px; background:var(--pantone-2021-ultimate-gray)" title="Ultimate Gray"></div>
-        <div style="width:32px; height:32px; border-radius:4px; background:var(--pantone-2021-illuminating)" title="Illuminating"></div>
-        <div style="width:32px; height:32px; border-radius:4px; background:var(--pantone-2020-classic-blue)" title="Classic Blue"></div>
-      </div>`,
+    lead: "The self-improvement loop (roadmap).",
+    html: `<p>The <strong>Distiller</strong> mines receipts for work coder keeps repeating and proposes a deterministic
+      <strong>operation</strong> to replace it — turning inference paid for once into computation free forever. The same
+      bet, applied by coder to its own history.</p>`,
   },
 ];
 
@@ -183,7 +180,6 @@ const BADGE: Record<TodoItem["status"], string> = { done: "✅", partial: "🟡"
 const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 /** Light markdown for trusted TODOS text: escape, then `code` and **bold**. */
 const lightMd = (s: string): string => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-const clip = (s: string, n = 220): string => (s.length > n ? `${s.slice(0, n).trimEnd()}…` : s);
 
 /** Parse TODOS_1.md (done) + TODOS_2.md (remaining) into per-area items — the granular build state. */
 async function readStatus(): Promise<{ total: Record<TodoItem["status"], number>; areas: Area[] } | null> {
@@ -213,7 +209,7 @@ async function readStatus(): Promise<{ total: Record<TodoItem["status"], number>
     const count = (s: TodoItem["status"]) => areas.reduce((n, a) => n + a.items.filter((i) => i.status === s).length, 0);
     return { total: { done: count("done"), partial: count("partial"), todo: count("todo") }, areas };
   } catch {
-    return null; // TODOS.md not reachable (package run standalone) — skip the section
+    return null;
   }
 }
 
@@ -223,13 +219,13 @@ function renderStatus(status: Awaited<ReturnType<typeof readStatus>>): string {
   const body = areas
     .map((a) => {
       const items = a.items
-        .map((i) => `<li class="t-${i.status}"><span class="badge">${BADGE[i.status]}</span> ${lightMd(clip(i.text))}</li>`)
+        .map((i) => `<li class="t-${i.status}"><span class="badge">${BADGE[i.status]}</span> <span class="todo-text">${lightMd(i.text)}</span></li>`)
         .join("");
       return `<h3>${esc(a.title)}</h3><ul class="todos">${items}</ul>`;
     })
     .join("");
   return `<section id="status"><h2>Build status</h2>
-    <p>Live from <code>TODOS_1.md</code> + <code>TODOS_2.md</code>: <strong>✅ ${total.done} done</strong> · 🟡 ${total.partial} in progress · ⬜ ${total.todo} planned.</p>
+    <p class="lead">What's actually shipped, live from <code>TODOS_1.md</code> + <code>TODOS_2.md</code>: <strong>✅ ${total.done} done</strong> · 🟡 ${total.partial} in progress · ⬜ ${total.todo} planned.</p>
     ${body}</section>`;
 }
 
@@ -237,61 +233,67 @@ function renderPage(statusSection: string): string {
   const navItems = SECTIONS.map((s) => `<a href="#${s.id}">${s.title}</a>`);
   if (statusSection) navItems.push(`<a href="#status">Build status</a>`);
   const nav = navItems.join("");
-  const body = SECTIONS.map((s) => `<section id="${s.id}"><h2>${s.title}</h2>${s.html}</section>`).join("\n") + statusSection;
+  const sections = SECTIONS.map((s) => `<section id="${s.id}"><h2>${s.title}</h2><p class="lead">${s.lead}</p>${s.html}</section>`).join("\n");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>coder — concepts</title>
+<title>coder — concept guide</title>
 <style>
-  :root {
-    /* Pantone Color of the Year Collection */
-    --pantone-2024-peach-fuzz: #FFBE98;
-    --pantone-2023-viva-magenta: #BE3455;
-    --pantone-2022-very-peri: #6667AB;
-    --pantone-2021-ultimate-gray: #939597;
-    --pantone-2021-illuminating: #F5DF4D;
-    --pantone-2020-classic-blue: #0F4C81;
-  }
-  :root { color-scheme: light dark; --fg:#1a1a1a; --muted:var(--pantone-2021-ultimate-gray); --accent:var(--pantone-2020-classic-blue); --bg:#fff; --code:#f4f4f5; --line:#e5e5e5; }
-  @media (prefers-color-scheme: dark){ :root{ --fg:#e8e8e8; --muted:var(--pantone-2021-ultimate-gray); --accent:var(--pantone-2024-peach-fuzz); --bg:#121212; --code:#1e1e1e; --line:#2a2a2a; } }
-  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--fg);
-    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
-  .layout { display:flex; max-width:1100px; margin:0 auto; align-items:flex-start; padding:32px 24px; gap:48px; }
-  .sidebar { position:sticky; top:32px; width:220px; flex-shrink:0; display:flex; flex-direction:column; gap:4px; max-height:calc(100vh - 64px); overflow-y:auto; }
-  .sidebar header h1 { font-size:2rem; margin:0; line-height:1.2; }
-  .sidebar header p { color:var(--muted); margin:.4rem 0 1.5rem; font-size:.9rem; line-height:1.4; }
-  .sidebar a { color:var(--fg); text-decoration:none; font-size:.95rem; padding:6px 10px; border-radius:6px; margin:0; }
-  .sidebar a:hover { background:var(--code); color:var(--accent); }
-  .content { flex:1; max-width:760px; padding-bottom:96px; }
-  @media (max-width: 768px) {
-    .layout { flex-direction:column; gap:24px; padding:24px 16px; }
-    .sidebar { position:static; width:100%; max-height:none; overflow-y:visible; border-bottom:1px solid var(--line); padding-bottom:16px; }
-    .sidebar a { display:inline-block; margin:0; }
-    .sidebar { flex-direction:row; flex-wrap:wrap; align-items:center; gap:8px 12px; }
-    .sidebar header { width:100%; margin-bottom:8px; }
-    .sidebar header p { margin-bottom:.5rem; }
-  }
-  section { margin:0 0 3.5rem; scroll-margin-top:32px; } h2 { font-size:1.35rem; margin:0 0 .8rem; }
-  p, ul { margin:.6rem 0; } li { margin:.25rem 0; }
-  code { background:var(--code); padding:.1em .35em; border-radius:4px; font-size:.88em;
+  :root { color-scheme: light dark;
+    --fg:#18181b; --muted:#6b7280; --accent:#BE3455; --bg:#fbfbfc; --code:#f1f1f3; --line:#e5e5ea; }
+  @media (prefers-color-scheme: dark){ :root{ --fg:#e8e8ea; --muted:#9a9aa2; --accent:#FFBE98; --bg:#0b0b0c; --code:#18181b; --line:#26262b; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; }
+  .layout { display:flex; max-width:1040px; margin:0 auto; align-items:flex-start; padding:40px 24px; gap:56px; }
+  .sidebar { position:sticky; top:40px; width:200px; flex-shrink:0; display:flex; flex-direction:column; gap:1px; max-height:calc(100vh - 80px); overflow-y:auto; }
+  .sidebar .brand { font-size:1.4rem; font-weight:700; margin:0 0 .1rem; color:var(--accent); letter-spacing:-.02em; }
+  .sidebar .tag { color:var(--muted); margin:0 0 1.4rem; font-size:.82rem; line-height:1.4; }
+  .sidebar a { color:var(--muted); text-decoration:none; font-size:.875rem; padding:5px 9px; border-radius:6px; }
+  .sidebar a:hover { background:var(--code); color:var(--fg); }
+  .content { flex:1; min-width:0; max-width:680px; overflow-wrap:break-word; }
+  .hero { margin:0 0 2.5rem; padding:0 0 2rem; border-bottom:1px solid var(--line); }
+  .hero h1 { font-size:2.1rem; letter-spacing:-.03em; margin:0 0 .5rem; }
+  .hero .pitch { font-size:1.12rem; color:var(--fg); margin:0 0 1.2rem; line-height:1.55; }
+  .hero .pitch b { color:var(--accent); }
+  .hero .sub { color:var(--muted); font-size:.92rem; margin:.6rem 0 0; }
+  section { margin:0 0 2.4rem; scroll-margin-top:32px; }
+  h2 { font-size:1.2rem; letter-spacing:-.01em; margin:0 0 .15rem; }
+  .lead { color:var(--muted); font-size:.95rem; margin:0 0 .7rem; }
+  p { margin:.6rem 0; } ul { margin:.6rem 0; padding-left:1.2rem; } li { margin:.3rem 0; }
+  code { background:var(--code); padding:.1em .35em; border-radius:4px; font-size:.86em;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-  pre { background:var(--code); padding:14px 16px; border-radius:8px; overflow:auto; }
-  pre code { background:none; padding:0; }
+  pre { background:var(--code); padding:13px 15px; border-radius:8px; overflow:auto; margin:.8rem 0; font-size:.86em; }
+  pre code { background:none; padding:0; font-size:1em; }
   a { color:var(--accent); }
-  h3 { font-size:1.02rem; margin:1.5rem 0 .35rem; }
-  ul.todos { list-style:none; padding-left:0; margin:.2rem 0 .8rem; }
-  ul.todos li { padding:.14rem 0 .14rem 1.7rem; text-indent:-1.7rem; font-size:.92rem; }
-  .badge { display:inline-block; width:1.3rem; }
-  .t-todo { color:var(--muted); }
-  footer { margin-top:4rem; padding-top:1.5rem; border-top:1px solid var(--line); color:var(--muted); font-size:.85rem; }
+  h3 { font-size:.95rem; margin:1.4rem 0 .3rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  ul.todos { list-style:none; padding-left:0; margin:.2rem 0 .8rem; display:flex; flex-direction:column; gap:7px; }
+  ul.todos li { margin:0; display:flex; gap:9px; align-items:flex-start; font-size:.9rem; }
+  .todo-text { flex:1; min-width:0; } .badge { flex-shrink:0; width:1.3rem; text-align:center; } .t-todo { color:var(--muted); }
+  footer { margin-top:3rem; padding-top:1.4rem; border-top:1px solid var(--line); color:var(--muted); font-size:.82rem; }
+  @media (max-width: 760px) {
+    .layout { flex-direction:column; gap:20px; padding:24px 18px; }
+    .sidebar { position:static; width:100%; max-height:none; overflow:visible; flex-direction:row; flex-wrap:wrap; align-items:center; gap:4px 8px; border-bottom:1px solid var(--line); padding-bottom:14px; }
+    .sidebar .brand, .sidebar .tag { width:100%; }
+    .sidebar .tag { margin-bottom:.4rem; }
+  }
 </style></head>
 <body><div class="layout">
   <aside class="sidebar">
-    <header><h1>coder</h1><p>a coding agent that computes over inferring — the concepts</p></header>
+    <div class="brand">coder</div>
+    <div class="tag">a coding agent that prefers computation to inference</div>
     ${nav}
   </aside>
   <main class="content">
-    ${body}
-    <footer>Generated by <code>coder-docs</code> — the Build status above is read live from <code>TODOS_1.md</code> + <code>TODOS_2.md</code> on each request.</footer>
+    <div class="hero">
+      <h1>coder</h1>
+      <p class="pitch">A coding agent — same category as Claude Code or Opencode — that <b>prefers computing over thinking</b> and treats <b>context as a budget</b>, because long context makes models less accurate, not just pricier.</p>
+      <pre><code>bun bin/coder                  # chat (default)
+bun bin/coder --once "&lt;task&gt;" # one task, then exit</code></pre>
+      <p class="sub">Set <code>GOOGLE_VERTEX_PROJECT</code> (Gemini on Vertex) or an Anthropic key. In chat: <code>/model</code> · <code>/facts</code> · <code>/stats</code>, <code>y</code>/<code>n</code> to sign off, <code>Esc</code> to scroll. Packages: <code>coder-core</code> · <code>coder-server</code> · <code>coder-tui</code> · <code>coder-docs</code>.</p>
+    </div>
+    ${sections}
+    ${statusSection}
+    <footer>Generated by <code>coder-docs</code> — concepts authored here; the Build status is read live from <code>TODOS_1.md</code> + <code>TODOS_2.md</code> on each request.</footer>
   </main>
 </div></body></html>`;
 }
