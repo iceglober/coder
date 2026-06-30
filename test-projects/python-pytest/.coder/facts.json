@@ -1,0 +1,6 @@
+{
+  "commands": {
+    "app-logs": { "cmd": "tail -n 100 ops/app.log", "desc": "tail the order service's application logs (recent INFO/WARN order events)" },
+    "db-query": { "cmd": "sqlite3 ops/app.db {sql}", "desc": "run a read-only SQL query against the operational database (tables: config, orders)" }
+  }
+}

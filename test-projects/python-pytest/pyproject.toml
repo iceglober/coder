@@ -1,7 +1,10 @@
 [project]
-name = "harness-temperature"
+name = "harness-store"
 version = "0.0.0"
 requires-python = ">=3.9"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# _seeds/ holds task templates (test_*.py copied to the root by a task's `seed`); never collect them
+# in place, or the baseline fails on tests for code that doesn't exist yet.
+addopts = "--ignore=_seeds"

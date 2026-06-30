@@ -54,12 +54,49 @@
     "note": "Full[Advanced] — staff+: introduce currency as a first-class concept (a Money value type with currency guards) and migrate money + cart to it while preserving formatUSD. Cross-module, architectural, behavior-preserving."
   },
   {
-    "id": "py-failing-test",
+    "id": "py-question",
     "project": "python-pytest",
-    "prompt": "A unit test is failing. Find the bug and fix it so the tests pass.",
+    "prompt": "Which module formats currency, and what is the exact name of the function it exports for that? Answer; don't change anything.",
+    "expect": ["money", "format_usd"],
+    "expectNoChange": true,
+    "note": "Question: answer from the code, read-only."
+  },
+  {
+    "id": "py-investigation",
+    "project": "python-pytest",
+    "prompt": "Customers report that large orders (around $500 and up) silently fail — the order doesn't go through and they see no error. Investigate using the available logs and the operational database, and report the root cause: what rejects these orders, and at what configured limit? This is an INVESTIGATION ONLY — do NOT modify any files; just report your diagnosis.",
+    "setup": "sqlite3 ops/app.db < ops/seed.sql",
+    "needs": ["sqlite3"],
+    "expect": ["max_order_cents", "50000"],
+    "expectNoChange": true,
+    "note": "Investigation: correlate the app log + a DB config row + order.py via the declared app-logs/db-query commands. Diagnose-only."
+  },
+  {
+    "id": "py-full-simple",
+    "project": "python-pytest",
+    "prompt": "A unit test is failing. Find the root cause and fix it so the test suite passes.",
+    "seed": "cp _seeds/money_bug.py money.py",
     "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
     "verify": "python -m pytest -q",
-    "note": "Exercises: python/pytest toolchain detection, single-test iteration (pytest -k), and a real source fix."
+    "note": "Full[Simple]: isolated one-file bug fix; single-test iteration (pytest -k)."
+  },
+  {
+    "id": "py-full-moderate",
+    "project": "python-pytest",
+    "prompt": "Add stacking discount codes. A code is either a percentage off or a fixed cents amount; several can apply. Implement a `discount` module: `apply_codes(subtotal_cents, codes)` applies them IN ORDER to a running total — percent codes take that percent off the current total (clamp a percent above 100 to 100, never negative; round to the nearest cent), fixed codes subtract cents, and the total never drops below 0. Also add `cart_total_after_codes(items, codes)` over the cart subtotal. A test spec (test_discount.py) defines the exact rules and edge cases.",
+    "seed": "cp _seeds/test_discount.py test_discount.py",
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
+    "verify": "python -m pytest -q",
+    "note": "Full[Moderate] — mid-level barely: discount engine with order-dependent stacking, 0 floor, percent clamp, cent rounding, cart wiring."
+  },
+  {
+    "id": "py-full-advanced",
+    "project": "python-pytest",
+    "prompt": "Make the domain currency-aware. Introduce a `Money` value type (cents + currency) on the money module with `Money.of(cents, currency)`, `.add`, `.subtract`, and `.format()` — formatting is currency-aware (USD -> \"$12.99\", EUR -> \"€12.99\") and arithmetic across DIFFERENT currencies must raise. Then migrate: `format_usd` keeps its exact existing output, and the cart's `cart_subtotal` must return a `Money` in the cart's currency (a mixed-currency cart raises). Test specs (test_money_currency.py and a rewritten test_cart.py) define the contract; all existing behavior must stay green.",
+    "seed": "cp _seeds/test_money_currency.py test_money_currency.py && cp _seeds/test_cart_currency.py test_cart.py",
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
+    "verify": "python -m pytest -q",
+    "note": "Full[Advanced] — staff+: introduce currency as first-class (Money + currency guards) and migrate money + cart while preserving format_usd."
   },
   {
     "id": "go-failing-test",
