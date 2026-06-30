@@ -37,7 +37,7 @@ export interface RunOnceOptions {
   root: string;
   tier?: Tier;
   modelId?: string;
-  /** Where the model runs (anthropic-direct or vertex); default CODER_PROVIDER. */
+  /** Where the model runs (vertex, anthropic-direct, or azure); default CODER_PROVIDER. */
   provider?: Provider;
   /** Where shell commands run (host or docker); default CODER_SANDBOX. */
   sandbox?: SandboxKind;
@@ -181,7 +181,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
     modelId = opts.modelId ?? "mock";
   } else {
     provider = opts.provider ?? resolveProvider();
-    const credError = preflight(provider);
+    const credError = preflight(provider, opts.modelId);
     if (credError) {
       opts.emit?.({ type: "turn.error", sessionId: opts.sessionId ?? "once", message: credError });
       return { ok: false, error: credError };

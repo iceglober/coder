@@ -32,7 +32,7 @@ USAGE
 OPTIONS
   --tier <cheap|fast|mid|deep>      model tier (default: mid; env CODER_TIER)
   --model <id>                      exact model id (overrides tier; env CODER_MODEL)
-  --provider <vertex|anthropic>     where the model runs (default: vertex; env CODER_PROVIDER)
+  --provider <vertex|anthropic|azure>  where the model runs (default: vertex; env CODER_PROVIDER)
   --sandbox <host|docker>           where shell commands run (default: host; env CODER_SANDBOX)
   --mode <auto|ask|auto-edit|plan>  permission posture (default: auto; env CODER_PERMISSION_MODE)
   --port <n>                        (with --serve) listen port (default 4123; env CODER_PORT)
@@ -42,11 +42,14 @@ OPTIONS
 
 Auth — vertex (default) runs Gemini: needs GOOGLE_VERTEX_PROJECT with gcloud
 application-default credentials. anthropic runs Claude: needs ANTHROPIC_API_KEY.
+azure runs Azure AI Foundry's OpenAI-compatible endpoint: needs AZURE_BASE_URL +
+AZURE_API_KEY (AZURE_API_VERSION optional) and an explicit --model / CODER_MODEL
+(your deployment name — azure has no default model).
 --mode auto (default) runs edits and shell without asking; pair with --sandbox
 docker when running anything you don't fully trust.`;
 
 const TIERS = new Set<Tier>(["cheap", "fast", "mid", "deep"]);
-const PROVIDERS = new Set<Provider>(["anthropic", "vertex"]);
+const PROVIDERS = new Set<Provider>(["anthropic", "vertex", "azure"]);
 const SANDBOXES = new Set<SandboxKind>(["host", "docker"]);
 
 interface RunBase {
@@ -91,7 +94,7 @@ const isYes = (s: string | null): boolean => s != null && /^y(es)?$/i.test(s.tri
 const dim = (s: string): string => `\x1b[90m${s}\x1b[39m`;
 
 /** models.dev catalog key for our provider (where pricing/model lists are indexed). */
-const catalogKey = (p?: Provider): string => (p === "anthropic" ? "anthropic" : "google-vertex");
+const catalogKey = (p?: Provider): string => (p === "anthropic" ? "anthropic" : p === "azure" ? "azure" : "google-vertex");
 
 /** The ledger rollup, formatted for the chat's `/stats`. */
 function formatStats(r: LedgerRollup): string {
