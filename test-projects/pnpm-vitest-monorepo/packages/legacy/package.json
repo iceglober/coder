@@ -1,0 +1,7 @@
+{
+  "name": "@harness/legacy",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "comment": "Exists only so the root package.json's stale `workspaces:[\"packages/legacy\"]` field resolves — the harness checks coder reads pnpm-workspace.yaml (37 real members) instead of being shadowed by this one. No test script, so `pnpm -r test` skips it."
+}

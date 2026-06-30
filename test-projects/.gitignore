@@ -1,0 +1,14 @@
+# The runner installs into throwaway copies, but ignore these in case anyone installs in-place.
+**/node_modules/
+**/.venv/
+**/.turbo/
+**/pnpm-lock.yaml
+**/__pycache__/
+**/.pytest_cache/
+**/ops/*.db
+# Keep a fixture's declared .coder/facts.json, but ignore coder's RUNTIME artifacts.
+**/.coder/ledger.jsonl
+**/.coder/verdicts.jsonl
+**/.coder/notes.jsonl
+**/.coder/run/
+**/.coder/operations/

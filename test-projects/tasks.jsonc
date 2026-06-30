@@ -1,0 +1,72 @@
+// Eval tasks for coder. Per task: the runner copies `project` to a throwaway dir, applies `seed`
+// (optional baseline perturbation), commits, runs coder once on an isolated worktree, then GRADES by
+// whichever of these are present: `verify` (exit 0), `expect` (all substrings in coder's output),
+// `expectNoChange` (git diff empty). `needs` skips when a tool is absent.
+// Run all:  bun test-projects/run.ts    ·    one: bun test-projects/run.ts js-invest
+//
+// The pnpm-vitest-monorepo carries all 5 task types (Question · Investigation · Full S/M/A) on a clean
+// baseline; each Full task seeds its own challenge so they don't collide. python + go are simple-fix
+// tasks for now (5-type expansion pending).
+[
+  {
+    "id": "js-question",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "Which workspace package owns the currency formatting, and what is the exact name of the function it exports for that? Answer; don't change anything.",
+    "expect": ["@harness/core", "formatUSD"],
+    "expectNoChange": true,
+    "note": "Question: answer from the code, read-only (graded on facts + zero diff)."
+  },
+  {
+    "id": "js-investigation",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "Customers report that large orders (around $500 and up) silently fail — the order doesn't go through and they see no error. Investigate using the available logs and the operational database, and report the root cause: what rejects these orders, and at what configured limit? This is an INVESTIGATION ONLY — do NOT modify any files; just report your diagnosis.",
+    "setup": "sqlite3 ops/app.db < ops/seed.sql",
+    "needs": ["sqlite3"],
+    "expect": ["max_order_cents", "50000"],
+    "expectNoChange": true,
+    "note": "Investigation: the cause is only findable by correlating the app log + a DB config row + order.ts. Exercises the declared app-logs/db-query commands (by intent) + run_code. Diagnosis only (read-only)."
+  },
+  {
+    "id": "js-full-simple",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "A unit test is failing in @harness/core. Find the root cause and fix it so the whole test suite passes.",
+    "seed": "cp _seeds/money-bug.ts packages/core/src/money.ts",
+    "setup": "pnpm install --silent",
+    "verify": "pnpm -r test",
+    "note": "Full[Simple]: isolated one-file bug fix. Exercises workspace detection + single-test iteration + fixing source, not the test."
+  },
+  {
+    "id": "js-full-moderate",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "Add stacking discount codes to @harness/core. A code is either a percentage off or a fixed cents amount; a cart can apply several. Implement a `discount` module: `applyCodes(subtotalCents, codes)` applies the codes IN ORDER to a running total — percent codes take that percent off the current total (a percent above 100 is clamped to 100, never negative; round to the nearest cent), fixed codes subtract cents, and the total never drops below 0. Also add `cartTotalAfterCodes(items, codes)` that applies the codes to the cart subtotal. A test spec (`discount.test.ts`) defines the exact rules and edge cases.",
+    "seed": "cp _seeds/discount.test.ts packages/core/src/discount.test.ts",
+    "setup": "pnpm install --silent",
+    "verify": "pnpm -r test",
+    "note": "Full[Moderate] — mid-level, barely: a discount engine with order-dependent stacking, a 0 floor, a percent clamp, cent rounding, and cart wiring. The difficulty is the rules + edge cases, not the file count."
+  },
+  {
+    "id": "js-full-advanced",
+    "project": "pnpm-vitest-monorepo",
+    "prompt": "Make @harness/core currency-aware. Introduce a `Money` value type (cents + currency) with `Money.of(cents, currency)`, `.add`, `.subtract`, and `.format()` — formatting is currency-aware (USD → \"$12.99\", EUR → \"€12.99\") and arithmetic across DIFFERENT currencies must throw (no implicit conversion). Then migrate the domain to it: `formatUSD` must keep its exact existing output, and the cart's subtotal must become a `Money` in the cart's currency (a mixed-currency cart is rejected). Test specs (`money.currency.test.ts`, and a rewritten `cart.test.ts`) define the contract; all existing behavior must stay green.",
+    "seed": "cp _seeds/money-currency.test.ts packages/core/src/money.currency.test.ts && cp _seeds/cart-currency.test.ts packages/core/src/cart.test.ts",
+    "setup": "pnpm install --silent",
+    "verify": "pnpm -r test",
+    "note": "Full[Advanced] — staff+: introduce currency as a first-class concept (a Money value type with currency guards) and migrate money + cart to it while preserving formatUSD. Cross-module, architectural, behavior-preserving."
+  },
+  {
+    "id": "py-failing-test",
+    "project": "python-pytest",
+    "prompt": "A unit test is failing. Find the bug and fix it so the tests pass.",
+    "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
+    "verify": "python -m pytest -q",
+    "note": "Exercises: python/pytest toolchain detection, single-test iteration (pytest -k), and a real source fix."
+  },
+  {
+    "id": "go-failing-test",
+    "project": "go-stdlib",
+    "prompt": "A unit test is failing. Find the bug and fix it so the tests pass.",
+    "needs": ["go"],
+    "verify": "go test ./...",
+    "note": "Exercises: go toolchain detection, package-scoped single-test iteration (go test -run), and a real source fix. Skips when `go` isn't installed."
+  }
+]

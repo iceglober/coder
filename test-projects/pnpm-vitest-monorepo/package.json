@@ -1,0 +1,9 @@
+{
+  "name": "harness-monorepo",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "workspaces": ["packages/legacy"],
+  "scripts": {
+    "test": "turbo run test"
+  }
+}
