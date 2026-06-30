@@ -15,6 +15,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createWorktree, removeWorktree, type Worktree } from "../packages/coder-core/src/worktree.ts";
+import { judgeSolution } from "../packages/coder-server/src/eval/judge.ts";
+
+// The LLM judge runs in THIS process (not a coder subprocess), so the Vertex creds must be on
+// process.env, not just the child env below.
+process.env.GOOGLE_VERTEX_PROJECT ??= "ai-tooling-496018";
+process.env.GOOGLE_VERTEX_LOCATION ??= "global";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CODER = join(HERE, "..", "bin", "coder");
@@ -30,6 +36,7 @@ interface Task {
   verify?: string; // command must exit 0 (Full tasks: a change makes a suite pass)
   expect?: string[]; // every substring must appear in coder's output (Question/Investigation)
   expectNoChange?: boolean; // `git diff` must be empty (read-only / diagnosis tasks)
+  judge?: string; // a rubric — an LLM grades coder's DIFF + report against it (ambiguous-hard tasks)
 }
 
 /** Tolerant JSONC: strip `//` line comments (not inside strings) so we can keep the manifest annotated. */
@@ -107,6 +114,15 @@ for (const t of tasks) {
       // Exclude .coder/ — coder rewrites its own facts cache there; that's not a source change.
       const d = await $`git diff --quiet -- ${"."} ${":(exclude).coder"}`.cwd(cwd).nothrow().quiet();
       if (d.exitCode !== 0) fails.push("expected read-only, but source files were changed");
+    }
+    if (t.judge) {
+      await $`git add -A`.cwd(cwd).quiet(); // stage incl. new files so the diff shows coder's whole solution
+      const diff = (await $`git diff --cached -- ${"."} ${":(exclude).coder"}`.cwd(cwd).nothrow().quiet()).stdout.toString();
+      const j = await judgeSolution(t.judge, t.prompt, out, diff);
+      const unmet = j.criteria.filter((c) => !c.met).map((c) => c.name);
+      console.log(`    judge: ${j.pass ? "\x1b[32mpass\x1b[0m" : "\x1b[31mfail\x1b[0m"} — ${j.summary}`);
+      if (unmet.length) console.log(`    unmet: ${unmet.join(", ")}`);
+      if (!j.pass) fails.push(`judge failed: ${j.summary.slice(0, 200)}`);
     }
     const pass = fails.length === 0;
     const { cost, changed } = summarize(out);
