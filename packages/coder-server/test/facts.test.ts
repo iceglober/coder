@@ -132,9 +132,54 @@ describe("project facts — polyglot toolchain detection", () => {
       expect(resolveCommand(facts, "test", "apps/web-app/src/app/tasks/page.test.tsx")?.command).toBe(
         "pnpm --filter @kn/web-app run test -- 'src/app/tasks/page.test.tsx'",
       );
+      // a single test BY NAME → the runner's -t filter appended (shell-quoted) — fast iteration on one test
+      expect(resolveCommand(facts, "test", "apps/web-app/src/app/tasks/page.test.tsx", undefined, "filters tasks correctly")?.command).toBe(
+        "pnpm --filter @kn/web-app run test -- 'src/app/tasks/page.test.tsx' -t 'filters tasks correctly'",
+      );
       // a human override template wins for cases coder can't detect
       facts.commands = { "test:file": "pnpm exec vitest run {file}" };
       expect(resolveCommand(facts, "test", "apps/web-app/x.test.tsx")?.command).toBe("pnpm exec vitest run 'apps/web-app/x.test.tsx'");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("pnpm-workspace.yaml wins over a stale package.json `workspaces` (precedence) — the kn-eng bug", async () => {
+    const dir = await repo({
+      // a stale npm-style `workspaces` names ONE package; pnpm IGNORES it. The yaml is the real list.
+      "package.json": JSON.stringify({ packageManager: "pnpm@10", workspaces: ["packages/legacy"], scripts: { test: "turbo test" } }),
+      "pnpm-lock.yaml": "",
+      "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n",
+      "packages/legacy/package.json": JSON.stringify({ name: "@kn/legacy", scripts: { test: "vitest run" } }),
+      "apps/web-app/package.json": JSON.stringify({ name: "@kn/web-app", scripts: { test: "vitest run" } }),
+    });
+    try {
+      const facts = await detectProjectFacts(dir);
+      const js = facts.toolchains.find((t) => t.name === "js");
+      // the yaml's apps/* member — would be MISSING (only @kn/legacy) if the stale field shadowed it
+      expect(js?.workspace?.map((w) => w.name)).toEqual(["@kn/web-app"]);
+      // so a test file scopes to the real package's runner (fast), not the root turbo wrapper (120s)
+      expect(resolveCommand(facts, "test", "apps/web-app/x.test.tsx")?.command).toBe("pnpm --filter @kn/web-app run test -- 'x.test.tsx'");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("go detector: go.mod → go test/build/vet; single test is package-scoped + name-anchored", async () => {
+    const dir = await repo({
+      "go.mod": "module example.com/m\n\ngo 1.22\n",
+      "calc/calc.go": "package calc\nfunc Add(a, b int) int { return a + b }\n",
+      "calc/calc_test.go": 'package calc\nimport "testing"\nfunc TestAdd(t *testing.T) {}\n',
+    });
+    try {
+      const facts = await detectProjectFacts(dir);
+      const go = facts.toolchains.find((t) => t.name === "go");
+      expect(go?.runner).toBe("go");
+      expect(go?.commands).toMatchObject({ test: "go test ./...", build: "go build ./...", lint: "go vet ./..." });
+      // a test FILE → its PACKAGE dir (Go is package-scoped, not file-scoped)
+      expect(resolveCommand(facts, "test", "calc/calc_test.go")?.command).toBe("go test ./calc");
+      // a single test BY NAME → -run with an ANCHORED regex
+      expect(resolveCommand(facts, "test", "calc/calc_test.go", undefined, "TestAdd")?.command).toBe("go test -run '^TestAdd$' ./calc");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -169,9 +214,16 @@ describe("project facts — polyglot toolchain detection", () => {
       // …and an injected task name (interpolated into scoped commands) is rejected outright.
       expect(resolveCommand(facts, "test; rm -rf ~", "apps/web")).toBeUndefined();
       expect(resolveCommand(facts, "nope")).toBeUndefined();
-      expect(renderFacts(facts)).toContain("declares tasks runnable via script: checks");
+      expect(renderFacts(facts)).toContain("DECLARES these project-specific commands");
+      expect(renderFacts(facts)).toContain("- checks(pr)"); // listed by name(args) for intent-selection
       const f = JSON.parse(await readFile(join(dir, ".coder", "facts.json"), "utf8"));
       expect(f.commands.checks).toBe("circleci-cli pipeline status"); // preserved across re-detect
+
+      // A `{cmd, desc}` declared command resolves to its cmd AND advertises the description, so coder
+      // selects by INTENT — no canonical role, no command name in the prompt.
+      facts.commands = { "pr-checks": { cmd: "gh pr checks {pr}", desc: "list a PR's CI check status" } };
+      expect(resolveCommand(facts, "pr-checks", undefined, { pr: "2704" })?.command).toBe("gh pr checks '2704'");
+      expect(renderFacts(facts)).toContain("- pr-checks(pr) — list a PR's CI check status");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

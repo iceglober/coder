@@ -54,10 +54,10 @@ export class PermissionPolicy {
   decide(tool: string, _input?: unknown): PermissionMode {
     const override = this.config.tools?.[tool];
     if (override) return override;
-    if (tool === "bash") return this.modes.bash; // arbitrary execution — gated on its own
-    // `remember` records project patterns to .coder/ metadata (not user source). Keep it frictionless
-    // (never prompt) — but still denied in plan/read-only, where nothing should be written.
-    if (tool === "remember") return this.modes.write === "deny" ? "deny" : "auto";
+    if (tool === "bash" || tool === "run_code") return this.modes.bash; // arbitrary execution — gated on its own
+    // `remember`/`declare_command` write .coder/ metadata (patterns + runnable commands), not user
+    // source. Keep them frictionless (never prompt) — but still denied in plan/read-only.
+    if (tool === "remember" || tool === "declare_command") return this.modes.write === "deny" ? "deny" : "auto";
     const effect = TOOL_EFFECTS[tool];
     if (effect === "write") return this.modes.write;
     if (effect === "verify") return this.modes.verify;

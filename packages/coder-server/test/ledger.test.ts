@@ -77,4 +77,28 @@ describe("ledger verdicts (the borrowed human sign-off)", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("rejectionStreak counts consecutive most-recent rejections, resets on accept", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "coder-ledger-"));
+    try {
+      const ledger = new Ledger(join(dir, ".coder", "ledger.jsonl"));
+      for (const id of ["r1", "r2", "r3"]) await ledger.record(receipt(id));
+      // r1 accepted, then r2 + r3 rejected (the two most recent) → streak 2.
+      await ledger.recordVerdict("r1", "accepted");
+      await ledger.recordVerdict("r2", "rejected");
+      await ledger.recordVerdict("r3", "rejected");
+      expect(await ledger.rejectionStreak()).toBe(2);
+
+      // A fresh accepted turn resets it.
+      await ledger.record(receipt("r4"));
+      await ledger.recordVerdict("r4", "accepted");
+      expect(await ledger.rejectionStreak()).toBe(0);
+
+      // Unknown (not signed off) turns don't count toward the streak.
+      await ledger.record(receipt("r5")); // stays unknown
+      expect(await ledger.rejectionStreak()).toBe(0); // last EXPLICIT sign-off is r4=accepted
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

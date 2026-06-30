@@ -44,12 +44,20 @@ export interface ProjectPattern {
   source?: "user" | "inferred";
 }
 
+/** A declared command: a shell command string, OR `{cmd, desc}` where `desc` is a one-line note on
+ *  what it's for. The description is what lets coder SELECT a command by intent — so the prompt never
+ *  hardcodes a command name or a canonical role; the model matches its need to the description. */
+export type DeclaredCommand = string | { cmd: string; desc?: string };
+export const cmdOf = (d: DeclaredCommand): string => (typeof d === "string" ? d : d.cmd);
+export const descOf = (d: DeclaredCommand): string | undefined => (typeof d === "string" ? undefined : d.desc);
+
 export interface ProjectFacts {
   toolchains: ToolchainFacts[];
-  /** Repo-level declared commands (any stack), from `.coder/facts.json`'s `commands`. Not
-   *  computed — this is where a "checks" command that talks to CI lives, so coder stays
-   *  forge-agnostic: local checks are universal; anything stack-specific is declared, not baked in. */
-  commands?: Record<string, string>;
+  /** Repo-level declared commands (any stack), from `.coder/facts.json`'s `commands`. Not computed —
+   *  this is where project-specific operations (a CI-checks command, a test-DB setup) live, so coder
+   *  stays forge-agnostic: universal toolchain tasks are computed; anything bespoke is DECLARED with a
+   *  description and selected by intent — never enumerated as a canonical role or named in the prompt. */
+  commands?: Record<string, DeclaredCommand>;
   /** Learned project patterns (human-authored or coder-recorded), preserved across re-detection. */
   patterns?: ProjectPattern[];
 }
@@ -140,11 +148,9 @@ const jsDetector: Detector = {
 /** The package manager's workspace globs: package.json `workspaces` (npm/yarn/bun) or
  *  pnpm-workspace.yaml `packages:` (pnpm). Empty when the repo isn't a workspace. */
 async function jsWorkspaceGlobs(root: string, pkg: { workspaces?: unknown }, files: string[]): Promise<string[]> {
-  const ws = pkg.workspaces;
-  if (Array.isArray(ws)) return ws as string[];
-  if (ws && typeof ws === "object" && Array.isArray((ws as { packages?: unknown }).packages)) {
-    return (ws as { packages: string[] }).packages;
-  }
+  // pnpm-workspace.yaml is AUTHORITATIVE when present — pnpm ignores package.json `workspaces`, so a
+  // stale npm-style field there must NOT shadow it (else a 37-package monorepo looks like 1, and every
+  // test scopes to the root turbo wrapper → the whole 120s suite).
   if (files.includes("pnpm-workspace.yaml")) {
     const text = (await readText(join(root, "pnpm-workspace.yaml"))) ?? "";
     const globs: string[] = [];
@@ -159,7 +165,13 @@ async function jsWorkspaceGlobs(root: string, pkg: { workspaces?: unknown }, fil
       if (m) globs.push(m[1].trim());
       else if (/^\S/.test(line)) break; // next top-level key ends the packages list
     }
-    return globs;
+    if (globs.length) return globs;
+  }
+  // npm / yarn / bun: the package.json `workspaces` field (array, or `{ packages: [...] }`).
+  const ws = pkg.workspaces;
+  if (Array.isArray(ws)) return ws as string[];
+  if (ws && typeof ws === "object" && Array.isArray((ws as { packages?: unknown }).packages)) {
+    return (ws as { packages: string[] }).packages;
   }
   return [];
 }
@@ -246,7 +258,24 @@ const pyDetector: Detector = {
   },
 };
 
-const DETECTORS: Detector[] = [jsDetector, pyDetector];
+// ── Go ────────────────────────────────────────────────────────────────────────
+// One toolchain per `go.mod` (Go modules are dir-anchored). There's no script manifest — the
+// commands are Go's fixed canonical set and the test runner is always `go test` (so `runner` is
+// unconditional). `vet` is the always-available linter; build doubles as the typecheck.
+const goDetector: Detector = {
+  name: "go",
+  async detect(_root, files) {
+    return uniqueDirs(files.filter((f) => basename(f) === "go.mod")).map((dir) => ({
+      name: "go",
+      variant: "go",
+      dir,
+      runner: "go",
+      commands: { install: "go mod download", test: "go test ./...", build: "go build ./...", lint: "go vet ./..." },
+    }));
+  },
+};
+
+const DETECTORS: Detector[] = [jsDetector, pyDetector, goDetector];
 
 /** The repo's non-ignored files (gitignore-respecting), repo-relative. Empty when not a git repo. */
 async function repoFiles(root: string): Promise<string[]> {
@@ -267,7 +296,7 @@ async function repoFiles(root: string): Promise<string[]> {
 // Human overrides, keyed by toolchain name → task → command. Win over computed, survive
 // re-detection. Edit `.coder/facts.json`'s `overrides` to pin a command coder can't compute.
 type Overrides = Record<string, Record<string, string>>;
-type Declared = Record<string, string>;
+type Declared = Record<string, DeclaredCommand>;
 interface FactsFile {
   computed?: ProjectFacts;
   overrides?: Overrides;
@@ -372,10 +401,20 @@ const isFilePath = (p: string): boolean => /[^/]\.[^/.]+$/.test(p);
  * for js (file made package-relative), or `<test cmd> <file>` for python. undefined ⇒ no known
  * runner (wrapper/opaque) → caller falls back to the whole task.
  */
-function testFileCommand(facts: ProjectFacts, tc: ToolchainFacts, path: string): { command: string; from: string } | undefined {
+/** The flag a runner uses to filter to a single test BY NAME — so you can iterate on one failing test
+ *  in seconds instead of re-running the whole file. undefined ⇒ unknown runner, no name filter. */
+function testNameFlag(runner: string): string | undefined {
+  if (runner === "pytest") return "-k"; // substring match
+  if (runner === "vitest" || runner === "jest") return "-t"; // --testNamePattern
+  // go is handled in testFileCommand's own branch — `-run` takes an anchored regex + a package dir,
+  // not the generic `<cmd> <file> <flag> <name>` shape this helper feeds.
+  return undefined;
+}
+
+function testFileCommand(facts: ProjectFacts, tc: ToolchainFacts, path: string, testName?: string): { command: string; from: string } | undefined {
   const norm = path.replace(/^\.?\//, "");
-  const tmpl = facts.commands?.["test:file"];
-  if (tmpl) return { command: tmpl.replaceAll("{file}", shellQuote(norm)), from: "declared" };
+  const tmplD = facts.commands?.["test:file"];
+  if (tmplD) return { command: cmdOf(tmplD).replaceAll("{file}", shellQuote(norm)), from: "declared" }; // explicit template — name not appended
   if (tc.name === "js") {
     const pkg = tc.workspace
       ?.filter((p) => norm === p.dir || norm.startsWith(`${p.dir}/`))
@@ -384,11 +423,23 @@ function testFileCommand(facts: ProjectFacts, tc: ToolchainFacts, path: string):
     if (!runner || !tc.variant) return undefined; // wrapper/opaque script — fall back to whole task
     const relFile = pkg ? norm.slice(pkg.dir.length + 1) : norm; // --filter runs in the package cwd
     const filter = pkg ? `--filter ${pkg.name} ` : "";
-    return { command: `${tc.variant} ${filter}run test -- ${shellQuote(relFile)}`, from: `${tc.name}:${runner}` };
+    const flag = testName ? testNameFlag(runner) : undefined;
+    const name = flag ? ` ${flag} ${shellQuote(testName as string)}` : "";
+    return { command: `${tc.variant} ${filter}run test -- ${shellQuote(relFile)}${name}`, from: `${tc.name}:${runner}` };
   }
   if (tc.name === "python" && tc.runner && tc.commands.test) {
     const relFile = tc.dir === "." ? norm : norm.slice(tc.dir.length + 1);
-    return { command: `${tc.commands.test} ${shellQuote(relFile)}`, from: `${tc.name}:${tc.runner}` };
+    const flag = testName ? testNameFlag(tc.runner) : undefined;
+    const name = flag ? ` ${flag} ${shellQuote(testName as string)}` : "";
+    return { command: `${tc.commands.test} ${shellQuote(relFile)}${name}`, from: `${tc.name}:${tc.runner}` };
+  }
+  if (tc.name === "go") {
+    // Go is PACKAGE-scoped, not file-scoped: run the file's package dir. The single-test filter is
+    // `-run <regex>`, so anchor the name (`^Name$`) to match exactly that test.
+    const pkgDir = dirname(norm);
+    const target = pkgDir === "." ? "." : `./${pkgDir}`;
+    const name = testName ? ` -run ${shellQuote(`^${testName}$`)}` : "";
+    return { command: `go test${name} ${target}`, from: "go" };
   }
   return undefined;
 }
@@ -420,16 +471,16 @@ function fillTemplate(tmpl: string, path?: string, args?: Record<string, string>
     .trim();
 }
 
-export function resolveCommand(facts: ProjectFacts, task: string, path?: string, args?: Record<string, string>): { command: string; from: string } | undefined {
+export function resolveCommand(facts: ProjectFacts, task: string, path?: string, args?: Record<string, string>, testName?: string): { command: string; from: string } | undefined {
   const declared = facts.commands?.[task]; // a declared key is user-authored; its values are quoted
-  if (declared) return { command: fillTemplate(declared, path, args), from: "declared" };
+  if (declared) return { command: fillTemplate(cmdOf(declared), path, args), from: "declared" };
   if (!TASK_NAME.test(task)) return undefined; // task is interpolated below — reject anything but a name
   const tc = toolchainForPath(facts, path);
   if (!tc) return undefined;
-  // Single FILE + a test task → run just that file via the cached runner variant (small output,
-  // visible failure). Falls through to whole-task scoping when the runner is unknown.
+  // Single FILE (+ optional single TEST by name) + a test task → run just that via the cached runner
+  // variant (tiny output, fast iteration). Falls through to whole-task scoping when the runner is unknown.
   if (task === "test" && path && isFilePath(path)) {
-    const scoped = testFileCommand(facts, tc, path);
+    const scoped = testFileCommand(facts, tc, path, testName);
     if (scoped) return scoped;
   }
   // Monorepo: if `path` is inside a workspace package, scope the command to it (not the whole
@@ -463,13 +514,18 @@ export function renderFacts(facts: ProjectFacts): string {
     .map((t) => `${t.name}${t.variant ? ` (${t.variant})` : ""}${t.dir === "." ? "" : ` @ ${t.dir}`}`)
     .join(", ");
   const head = list ? `Project toolchains: ${list}. ` : "";
-  // Show each templated task with its named args — `checks(pr)`, `deploy(env, tag)` — so the model
-  // knows which values to pass.
+  // Advertise each declared command as `name(args) — description` so coder can SELECT it by INTENT.
+  // The description is the whole point: the prompt names no command and no role; the model reads
+  // these and picks the one that fits its need (e.g. "list a PR's CI check status").
   const declaredList = declared.map((n) => {
-    const a = templateArgs(facts.commands?.[n] ?? "");
-    return a.length ? `${n}(${a.join(", ")})` : n;
+    const d = facts.commands?.[n];
+    const a = d ? templateArgs(cmdOf(d)) : [];
+    const desc = d ? descOf(d) : undefined;
+    return `- ${n}${a.length ? `(${a.join(", ")})` : ""}${desc ? ` — ${desc}` : ""}`;
   });
-  const declaredNote = declared.length ? ` This repo also declares tasks runnable via script: ${declaredList.join(", ")}.` : "";
+  const declaredNote = declared.length
+    ? `\n\nThis repo also DECLARES these project-specific commands — run with \`script(name, {args})\`; pick the one whose description fits what you need to do:\n${declaredList.join("\n")}`
+    : "";
   return `${head}Run project tasks (test, typecheck, lint, build, install, or any package script) with the \`script\` tool — it picks the correct command per toolchain; do NOT run npm/pnpm/uv/etc. by hand.${declaredNote}`;
 }
 

@@ -227,6 +227,14 @@ function endsByAsking(text: string | undefined): boolean {
   return /\?$/.test(t) || /\b(clarif|ambiguous|too vague|need more (info|information|detail)|let me know|what (kind|do you mean)|which would|could you (clarify|specify)|please (specify|clarify))/i.test(t);
 }
 
+/** Turn-start steer derived from recent sign-offs — this is what makes a rejection PAY OFF. */
+function rejectionSteerFor(streak: number): string {
+  if (streak <= 0) return "";
+  if (streak >= 2)
+    return `⚠️ The user has REJECTED your last ${streak} attempts in a row. If this turn continues that work, STOP — the same class of fix is not working, so do NOT ship another variation of it. CHANGE STRATEGY: reproduce the problem a different way, ask the user a focused structured question (ask_user), or step back and re-find the root cause. And do not claim success you cannot verify.`;
+  return `⚠️ The user REJECTED your previous attempt. If this turn continues that work, do NOT repeat the same approach — find a genuinely different one, or ask. The conversation above shows what you already tried.`;
+}
+
 /** Rough token estimate (~4 chars/token) for the context meter — good enough for a budget gauge. */
 function estTokens(messages: ModelMessage[] | undefined): number {
   if (!messages) return 0;
@@ -264,14 +272,14 @@ function lastAssistantText(messages?: ModelMessage[]): string | undefined {
 /** Cheap classification: does this task need an investigation phase, or a direct action?
  *  Sees the recent session so a follow-up ("resolve the threads on that PR") routes to a
  *  direct action on the known entity, not a fresh codebase bug-hunt. */
-async function triage(args: StreamArgs): Promise<"investigate" | "direct"> {
+async function triage(args: StreamArgs): Promise<"investigate" | "direct" | "diagnose"> {
   try {
     const recent = lastAssistantText(args.history)?.slice(0, 1200);
     const { object } = await generateObject({
       model: args.model,
-      schema: z.object({ mode: z.enum(["investigate", "direct"]) }),
+      schema: z.object({ mode: z.enum(["investigate", "direct", "diagnose"]) }),
       system: "Route a coding task to a strategy. Reply with the classification only.",
-      prompt: `${recent ? `Recent session (for resolving references like "that PR" / "the threads"):\n${recent}\n\n` : ""}Task: """${args.task}"""\n\n"investigate" = solving it needs understanding existing code first: a bug to diagnose, a "why/where does X happen", or a change whose correct location isn't obvious. "direct" = a clearly-localized edit, a follow-up/action on something already in the session (a PR, a file just changed), a simple question, OR an AMBIGUOUS / open-ended request ("clean up the docs", "improve X") that should be clarified or bounded before any work — never sent off to investigate-and-sweep. Classify.`,
+      prompt: `${recent ? `Recent session (for resolving references like "that PR" / "the threads"):\n${recent}\n\n` : ""}Task: """${args.task}"""\n\n"investigate" = the user wants a CHANGE that first needs understanding existing code: a bug to FIX, or a feature whose correct location isn't obvious. "diagnose" = the user wants only to UNDERSTAND or be TOLD something, with NO code change — explain/report/find the cause of X, "why/where does X happen", an audit, or an explicit "investigate but don't modify anything". If the task asks to report/diagnose/explain and does NOT ask for a fix (or forbids changes), it is "diagnose", not "investigate". "direct" = a clearly-localized edit, a follow-up/action on something already in the session (a PR, a file just changed), a simple question answerable without deep investigation, OR an AMBIGUOUS / open-ended request ("clean up the docs", "improve X") that should be clarified or bounded before any work — never sent off to investigate-and-sweep. Classify.`,
       abortSignal: args.signal,
     });
     return object.mode;
@@ -308,7 +316,7 @@ async function orchestrate(args: StreamArgs): Promise<RunOnceResult> {
     return meter({ ...res, messages: [...prior, { role: "user", content: args.task }, { role: "assistant", content: lastAssistantText(res.messages) ?? "" }] });
   }
 
-  banner("triage: investigate — read-only investigator (diagnosing, no edits)");
+  banner(mode === "diagnose" ? "triage: diagnose — read-only, report only (no fix)" : "triage: investigate — read-only investigator (diagnosing, no edits)");
   // Keep args.history (the compact prior-turn verdicts/reports — the working memory) so the
   // investigator can resolve references like "that PR". Its own exploration stays isolated:
   // orchestrate returns only the compact verdict, never the subagent's raw transcript.
@@ -321,10 +329,11 @@ async function orchestrate(args: StreamArgs): Promise<RunOnceResult> {
 
   const verdict = lastAssistantText(inv.messages) ?? "";
   const posture = args.permissionMode ?? resolvePosture();
-  // Stop at the diagnosis when there's nothing to implement: read-only mode, no verdict, or the
-  // investigation ended by ASKING the user to clarify — running an implementer over a question just
-  // re-asks it (and wastes a phase). Surface the question as the turn's answer instead.
-  if (posture === "plan" || !verdict || endsByAsking(verdict) || inv.askedUser) {
+  // Stop at the diagnosis when there's nothing to implement: a DIAGNOSE-only task (the user wanted a
+  // report, not a change — don't run an implementer that edits anyway), read-only/plan mode, no
+  // verdict, or the investigation ended by ASKING the user to clarify (an implementer would just
+  // re-ask). Surface the verdict/question as the turn's answer instead.
+  if (mode === "diagnose" || posture === "plan" || !verdict || endsByAsking(verdict) || inv.askedUser) {
     return meter({ ...inv, messages: [...prior, { role: "user", content: args.task }, { role: "assistant", content: verdict || "(asked the user to clarify)" }] });
   }
 
@@ -413,7 +422,10 @@ async function runStream(opts: StreamArgs): Promise<RunOnceResult> {
   // Learned project patterns — a compact pointer index (read on demand), so coder reuses what
   // exists instead of re-asking or reinventing. Injected once, kept terse.
   const patternsSlice = renderPatterns(facts);
-  const system = `${baseSystem}\n\n${OUTPUT_CONTRACT}${factsSlice ? `\n\n${factsSlice}` : ""}${patternsSlice ? `\n\n${patternsSlice}` : ""}${posture === "plan" ? `\n\n${PLAN_MODE_NOTE}` : ""}`;
+  // A sign-off PAYS OFF: if the user just rejected, steer this turn away from repeating the rejected
+  // approach (and at a streak, force a strategy change) — not just a stats counter.
+  const rejectionSteer = rejectionSteerFor(ledger ? await ledger.rejectionStreak() : 0);
+  const system = `${baseSystem}\n\n${OUTPUT_CONTRACT}${factsSlice ? `\n\n${factsSlice}` : ""}${patternsSlice ? `\n\n${patternsSlice}` : ""}${rejectionSteer ? `\n\n${rejectionSteer}` : ""}${posture === "plan" ? `\n\n${PLAN_MODE_NOTE}` : ""}`;
   // Load model pricing in parallel with the turn (cached after first run; never blocks if offline).
   const catalogReady = ensureCatalog();
 
@@ -444,6 +456,11 @@ async function runStream(opts: StreamArgs): Promise<RunOnceResult> {
         // Visible accountability for learning: a change the user can't see is one they can't approve.
         const what = p.ref ? `→ ${p.ref}` : `= ${p.value ?? ""}`;
         const text = `\n🧠 remembered: ${p.key} ${what}`;
+        emit({ type: "message.delta", sessionId, text });
+        if (headless) process.stdout.write(`${text}\n`);
+      },
+      onDeclare: (task, command) => {
+        const text = `\n📋 declared command: ${task} = ${command}`;
         emit({ type: "message.delta", sessionId, text });
         if (headless) process.stdout.write(`${text}\n`);
       },

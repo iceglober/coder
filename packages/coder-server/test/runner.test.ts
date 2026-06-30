@@ -161,6 +161,60 @@ describe("runOnce against a mock model", () => {
     }
   });
 
+  test("a rejection pays off — the next turn is steered away from the rejected approach", async () => {
+    const root = await mkdtemp(join(tmpdir(), "coder-runner-"));
+    try {
+      const simple = () => new MockLanguageModelV3({ doGenerate: async () => gen([{ type: "text", text: "Tried approach A." }], "stop", 5, 2) });
+
+      // Turn 1, then the user REJECTS it.
+      const res1 = await runOnce({ task: "fix the overflow", root, model: simple() });
+      await new Ledger(join(root, ".coder", "ledger.jsonl")).recordVerdict(res1.receipt!.id, "rejected");
+
+      // Turn 2: capture the prompt the model is called with — it must carry the rejection steer.
+      let captured = "";
+      const model2 = new MockLanguageModelV3({
+        doGenerate: async (options: { prompt: unknown }) => {
+          captured = JSON.stringify(options.prompt);
+          return gen([{ type: "text", text: "Tried approach B." }], "stop", 5, 2);
+        },
+      });
+      await runOnce({ task: "still overflowing", root, model: model2 });
+      expect(captured).toContain("REJECTED"); // the steer reached the model
+      expect(captured).toContain("do NOT repeat the same approach");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("declare_command persists a runnable command to facts.json and surfaces it", async () => {
+    let call = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        call += 1;
+        if (call === 1) {
+          return gen(
+            [{ type: "tool-call", toolCallId: "d1", toolName: "declare_command", input: JSON.stringify({ task: "test", command: "docker compose up -d testdb && pnpm test" }) }],
+            "tool-calls",
+            6,
+            3,
+          );
+        }
+        return gen([{ type: "text", text: "Declared the test command." }], "stop", 6, 2);
+      },
+    });
+    const root = await mkdtemp(join(tmpdir(), "coder-runner-"));
+    const events: ServerEvent[] = [];
+    try {
+      await runOnce({ task: "how do I run the tests", root, model, emit: (e) => events.push(e) });
+      const onDisk = JSON.parse(await readFile(join(root, ".coder", "facts.json"), "utf8"));
+      expect(onDisk.commands.test).toBe("docker compose up -d testdb && pnpm test");
+      const declared = events.some((e) => e.type === "message.delta" && (e as { text: string }).text.includes("📋 declared command: test"));
+      expect(declared).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("remember records a project pattern (visible), persists it, denied in plan", async () => {
     const rememberModel = () =>
       new MockLanguageModelV3({

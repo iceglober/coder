@@ -43,6 +43,28 @@ export class Ledger {
     return receipts;
   }
 
+  /** The most-recent EXPLICIT sign-offs (accepted/rejected only), newest first, capped — backs the
+   *  rejection steer so a sign-off changes the next turn instead of only feeding stats. */
+  async recentSignoffs(limit = 6): Promise<Verdict[]> {
+    const receipts = await this.all();
+    const signed = receipts.filter((r) => r.verdict === "accepted" || r.verdict === "rejected");
+    return signed
+      .slice(-limit)
+      .reverse()
+      .map((r) => r.verdict);
+  }
+
+  /** How many of the most-recent signed-off turns were REJECTED in a row (0 if the last was
+   *  accepted). 1 ⇒ "don't repeat that approach"; ≥2 ⇒ "change strategy, stop guessing". */
+  async rejectionStreak(): Promise<number> {
+    let n = 0;
+    for (const v of await this.recentSignoffs()) {
+      if (v === "rejected") n += 1;
+      else break;
+    }
+    return n;
+  }
+
   /** Rollup for the status bar: totals + verdict mix + average effort across all receipts. */
   async rollup(): Promise<LedgerRollup> {
     const receipts = await this.all();
