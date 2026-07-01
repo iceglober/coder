@@ -1,25 +1,13 @@
 {
-  "name": "coder",
+  "name": "agentj",
   "private": true,
-  "description": "A coding agent that prefers computation to inference and actively manages its context budget. Self-contained; multi-provider via the Vercel AI SDK.",
+  "description": "agentj: a simple, effective terminal coding agent. The product is the Rust/ratatui crate in agentj-rs/; this file just carries convenience scripts + the bun eval harness.",
   "license": "MIT",
   "packageManager": "bun@1.2.0",
-  "workspaces": [
-    "packages/*"
-  ],
   "scripts": {
-    "build": "bun run --filter='*' build",
-    "test": "bun run --filter='*' test",
-    "typecheck": "bun run --filter='*' typecheck",
-    "lint": "bun run --filter='*' lint",
-    "coder": "bun bin/coder"
-  },
-  "dependencies": {
-    "coder-tui": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "@types/node": "^22",
-    "typescript": "^5.7.3"
+    "agentj": "./bin/agentj",
+    "build": "cargo build --release --manifest-path agentj-rs/Cargo.toml",
+    "test": "cargo test --manifest-path agentj-rs/Cargo.toml",
+    "eval": "bun test-projects/run.ts"
   }
 }

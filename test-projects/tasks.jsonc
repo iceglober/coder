@@ -1,6 +1,6 @@
-// Eval tasks for coder. Per task: the runner copies `project` to a throwaway dir, applies `seed`
-// (optional baseline perturbation), commits, runs coder once on an isolated worktree, then GRADES by
-// whichever of these are present: `verify` (exit 0), `expect` (all substrings in coder's output),
+// Eval tasks for agentj. Per task: the runner copies `project` to a throwaway dir, applies `seed`
+// (optional baseline perturbation), commits (the `base`), runs agentj once in that dir, then GRADES by
+// whichever of these are present: `verify` (exit 0), `expect` (all substrings in agentj's output),
 // `expectNoChange` (git diff empty). `needs` skips when a tool is absent.
 // Run all:  bun test-projects/run.ts    ·    one: bun test-projects/run.ts js-invest
 //
@@ -60,7 +60,7 @@
     "setup": "pnpm install --silent",
     "verify": "pnpm -r test",
     "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/interface mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
-    "note": "AMBIGUOUS-HARD (staff+): no spec — coder designs the abstraction. Graded by the LLM judge on design quality, plus verify that the baseline stays green."
+    "note": "AMBIGUOUS-HARD (staff+): no spec — agentj designs the abstraction. Graded by the LLM judge on design quality, plus verify that the baseline stays green."
   },
   {
     "id": "py-question",
@@ -114,7 +114,7 @@
     "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
     "verify": "python -m pytest -q",
     "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/protocol mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
-    "note": "AMBIGUOUS-HARD (staff+): no spec — coder designs the abstraction. LLM-judge graded on design + verify the baseline stays green."
+    "note": "AMBIGUOUS-HARD (staff+): no spec — agentj designs the abstraction. LLM-judge graded on design + verify the baseline stays green."
   },
   {
     "id": "go-question",
@@ -168,6 +168,6 @@
     "needs": ["go"],
     "verify": "go test ./...",
     "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/interface mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
-    "note": "AMBIGUOUS-HARD (staff+): no spec — coder designs the abstraction (a Go interface). LLM-judge graded on design + verify the baseline stays green."
+    "note": "AMBIGUOUS-HARD (staff+): no spec — agentj designs the abstraction (a Go interface). LLM-judge graded on design + verify the baseline stays green."
   }
 ]

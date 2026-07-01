@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# agentj — launches the Rust (ratatui) build in agentj-rs/.
+# On first run (or after `cargo clean`) it builds the release binary, then execs it.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+bin="$here/agentj-rs/target/release/agentj"
+if [ ! -x "$bin" ]; then
+  echo "agentj: building the release binary (first run)…" >&2
+  cargo build --release --manifest-path "$here/agentj-rs/Cargo.toml" >&2
+fi
+exec "$bin" "$@"

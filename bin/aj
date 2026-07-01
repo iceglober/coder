@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# aj — short alias for the agentj launcher.
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agentj" "$@"
