@@ -864,6 +864,133 @@ mod tests {
         action
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ActionKind {
+        None,
+        AbortTurn,
+        CtrlC,
+        Quit,
+        PageUp,
+        PageDown,
+        ScrollUp,
+        ScrollDown,
+        ClearInput,
+        Newline,
+        Submit,
+        Complete,
+        DeleteToBufferHome,
+        DeleteWordLeft,
+        Backspace,
+        DeleteToLineEnd,
+        DeleteWordRight,
+        Delete,
+        Home,
+        End,
+        WordLeft,
+        WordRight,
+        Left,
+        Right,
+        Up,
+        Down,
+        Char,
+    }
+
+    impl ActionKind {
+        fn of(action: Action) -> Self {
+            match action {
+                Action::None => Self::None,
+                Action::AbortTurn => Self::AbortTurn,
+                Action::CtrlC => Self::CtrlC,
+                Action::Quit => Self::Quit,
+                Action::PageUp => Self::PageUp,
+                Action::PageDown => Self::PageDown,
+                Action::ScrollUp => Self::ScrollUp,
+                Action::ScrollDown => Self::ScrollDown,
+                Action::ClearInput => Self::ClearInput,
+                Action::Newline => Self::Newline,
+                Action::Submit(_) => Self::Submit,
+                Action::Complete => Self::Complete,
+                Action::DeleteToBufferHome => Self::DeleteToBufferHome,
+                Action::DeleteWordLeft => Self::DeleteWordLeft,
+                Action::Backspace => Self::Backspace,
+                Action::DeleteToLineEnd => Self::DeleteToLineEnd,
+                Action::DeleteWordRight => Self::DeleteWordRight,
+                Action::Delete => Self::Delete,
+                Action::Home => Self::Home,
+                Action::End => Self::End,
+                Action::WordLeft => Self::WordLeft,
+                Action::WordRight => Self::WordRight,
+                Action::Left => Self::Left,
+                Action::Right => Self::Right,
+                Action::Up => Self::Up,
+                Action::Down => Self::Down,
+                Action::Char(_) => Self::Char,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct KeymapCase {
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        running: bool,
+        expected: ActionKind,
+    }
+
+    const KEYMAP_CASES: &[KeymapCase] = &[
+        KeymapCase { code: KeyCode::Esc, modifiers: KeyModifiers::NONE, running: true, expected: ActionKind::AbortTurn },
+        KeymapCase { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, running: true, expected: ActionKind::CtrlC },
+        KeymapCase { code: KeyCode::Char('d'), modifiers: KeyModifiers::CONTROL, running: true, expected: ActionKind::Quit },
+        KeymapCase { code: KeyCode::PageUp, modifiers: KeyModifiers::NONE, running: true, expected: ActionKind::PageUp },
+        KeymapCase { code: KeyCode::PageDown, modifiers: KeyModifiers::NONE, running: true, expected: ActionKind::PageDown },
+        KeymapCase { code: KeyCode::Up, modifiers: KeyModifiers::CONTROL, running: true, expected: ActionKind::ScrollUp },
+        KeymapCase { code: KeyCode::Down, modifiers: KeyModifiers::CONTROL, running: true, expected: ActionKind::ScrollDown },
+        KeymapCase { code: KeyCode::Char('b'), modifiers: KeyModifiers::ALT, running: true, expected: ActionKind::WordLeft },
+        KeymapCase { code: KeyCode::Char('B'), modifiers: KeyModifiers::ALT, running: true, expected: ActionKind::WordLeft },
+        KeymapCase { code: KeyCode::Char('f'), modifiers: KeyModifiers::ALT, running: true, expected: ActionKind::WordRight },
+        KeymapCase { code: KeyCode::Char('F'), modifiers: KeyModifiers::ALT, running: true, expected: ActionKind::WordRight },
+        KeymapCase { code: KeyCode::Enter, modifiers: KeyModifiers::NONE, running: true, expected: ActionKind::None },
+        KeymapCase { code: KeyCode::Tab, modifiers: KeyModifiers::NONE, running: true, expected: ActionKind::None },
+        KeymapCase { code: KeyCode::Left, modifiers: KeyModifiers::NONE, running: true, expected: ActionKind::None },
+        KeymapCase { code: KeyCode::Char('x'), modifiers: KeyModifiers::NONE, running: true, expected: ActionKind::None },
+        KeymapCase { code: KeyCode::Esc, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::ClearInput },
+        KeymapCase { code: KeyCode::Enter, modifiers: KeyModifiers::SHIFT, running: false, expected: ActionKind::Newline },
+        KeymapCase { code: KeyCode::Enter, modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::Newline },
+        KeymapCase { code: KeyCode::Enter, modifiers: KeyModifiers::CONTROL, running: false, expected: ActionKind::Newline },
+        KeymapCase { code: KeyCode::Char('j'), modifiers: KeyModifiers::CONTROL, running: false, expected: ActionKind::Newline },
+        KeymapCase { code: KeyCode::Tab, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::Complete },
+        KeymapCase { code: KeyCode::Backspace, modifiers: KeyModifiers::SUPER, running: false, expected: ActionKind::DeleteToBufferHome },
+        KeymapCase { code: KeyCode::Backspace, modifiers: KeyModifiers::CONTROL, running: false, expected: ActionKind::DeleteToBufferHome },
+        KeymapCase { code: KeyCode::Backspace, modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::DeleteWordLeft },
+        KeymapCase { code: KeyCode::Backspace, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::Backspace },
+        KeymapCase { code: KeyCode::Delete, modifiers: KeyModifiers::SUPER, running: false, expected: ActionKind::DeleteToLineEnd },
+        KeymapCase { code: KeyCode::Delete, modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::DeleteWordRight },
+        KeymapCase { code: KeyCode::Delete, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::Delete },
+        KeymapCase { code: KeyCode::Left, modifiers: KeyModifiers::SUPER, running: false, expected: ActionKind::Home },
+        KeymapCase { code: KeyCode::Right, modifiers: KeyModifiers::SUPER, running: false, expected: ActionKind::End },
+        KeymapCase { code: KeyCode::Left, modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::WordLeft },
+        KeymapCase { code: KeyCode::Right, modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::WordRight },
+        KeymapCase { code: KeyCode::Left, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::Left },
+        KeymapCase { code: KeyCode::Right, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::Right },
+        KeymapCase { code: KeyCode::Up, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::Up },
+        KeymapCase { code: KeyCode::Down, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::Down },
+        KeymapCase { code: KeyCode::Home, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::Home },
+        KeymapCase { code: KeyCode::End, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::End },
+        KeymapCase { code: KeyCode::PageUp, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::PageUp },
+        KeymapCase { code: KeyCode::PageDown, modifiers: KeyModifiers::NONE, running: false, expected: ActionKind::PageDown },
+        KeymapCase { code: KeyCode::Up, modifiers: KeyModifiers::CONTROL, running: false, expected: ActionKind::ScrollUp },
+        KeymapCase { code: KeyCode::Down, modifiers: KeyModifiers::CONTROL, running: false, expected: ActionKind::ScrollDown },
+        KeymapCase { code: KeyCode::Char('d'), modifiers: KeyModifiers::CONTROL, running: false, expected: ActionKind::Quit },
+        KeymapCase { code: KeyCode::Char('b'), modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::WordLeft },
+        KeymapCase { code: KeyCode::Char('B'), modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::WordLeft },
+        KeymapCase { code: KeyCode::Char('f'), modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::WordRight },
+        KeymapCase { code: KeyCode::Char('F'), modifiers: KeyModifiers::ALT, running: false, expected: ActionKind::WordRight },
+        KeymapCase { code: KeyCode::Char('A'), modifiers: KeyModifiers::SHIFT, running: false, expected: ActionKind::Char },
+        KeymapCase { code: KeyCode::Char(':'), modifiers: KeyModifiers::SHIFT, running: false, expected: ActionKind::Char },
+        KeymapCase { code: KeyCode::Char('!'), modifiers: KeyModifiers::SHIFT, running: false, expected: ActionKind::Char },
+        KeymapCase { code: KeyCode::Char('('), modifiers: KeyModifiers::SHIFT, running: false, expected: ActionKind::Char },
+    ];
+
     #[test]
     fn insert_backspace_and_midline_insert() {
         let mut e = Editor::default();
@@ -963,224 +1090,40 @@ mod tests {
     }
 
     #[test]
-    fn enter_submits_while_chords_insert_newlines() {
-        let plain = |c| key(c, KeyModifiers::NONE);
-        // Plain Enter submits (the whole bug).
-        assert!(
-            matches!(key_to_action(plain(KeyCode::Enter), false, "hi"), Action::Submit(s) if s == "hi")
-        );
-        // Shift/Alt/Ctrl+Enter and Ctrl-J insert a newline, but shifted printable chars still type normally.
+    fn keymap_table_covers_all_supported_non_submit_bindings() {
+        for case in KEYMAP_CASES {
+            let actual = ActionKind::of(key_to_action(key(case.code, case.modifiers), case.running, " hi "));
+            assert_eq!(
+                actual, case.expected,
+                "unexpected action for {:?} with {:?} while running={} ",
+                case.code, case.modifiers, case.running
+            );
+        }
+    }
+
+    #[test]
+    fn submit_binding_trims_input() {
         assert!(matches!(
-            key_to_action(key(KeyCode::Enter, KeyModifiers::SHIFT), false, "hi"),
-            Action::Newline
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Enter, KeyModifiers::ALT), false, "hi"),
-            Action::Newline
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Enter, KeyModifiers::CONTROL), false, "hi"),
-            Action::Newline
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('j'), KeyModifiers::CONTROL), false, "hi"),
-            Action::Newline
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('A'), KeyModifiers::SHIFT), false, "hi"),
-            Action::Char('A')
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char(':'), KeyModifiers::SHIFT), false, "hi"),
-            Action::Char(':')
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('!'), KeyModifiers::SHIFT), false, "hi"),
-            Action::Char('!')
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('('), KeyModifiers::SHIFT), false, "hi"),
-            Action::Char('(')
-        ));
-        // Arrows move the cursor; Alt+arrows jump by word; Cmd/Super+arrows jump to line edges.
-        assert!(matches!(
-            key_to_action(plain(KeyCode::Left), false, "hi"),
-            Action::Left
-        ));
-        assert!(matches!(
-            key_to_action(plain(KeyCode::Up), false, "hi"),
-            Action::Up
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Left, KeyModifiers::ALT), false, "hi"),
-            Action::WordLeft
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Right, KeyModifiers::ALT), false, "hi"),
-            Action::WordRight
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Left, KeyModifiers::SUPER), false, "hi"),
-            Action::Home
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Right, KeyModifiers::SUPER), false, "hi"),
-            Action::End
-        ));
-        // Typing is ignored mid-turn, but Esc interrupts, Ctrl-C signals quit, and Ctrl+↑ scrolls.
-        assert!(matches!(
-            key_to_action(plain(KeyCode::Char('x')), true, ""),
-            Action::None
-        ));
-        assert!(matches!(
-            key_to_action(plain(KeyCode::Esc), true, ""),
-            Action::AbortTurn
-        ));
-        assert!(matches!(
-            key_to_action(plain(KeyCode::Esc), false, "hi"),
-            Action::ClearInput
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('c'), KeyModifiers::CONTROL), true, ""),
-            Action::CtrlC
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Up, KeyModifiers::CONTROL), true, ""),
-            Action::ScrollUp
+            key_to_action(key(KeyCode::Enter, KeyModifiers::NONE), false, "  hi  "),
+            Action::Submit(s) if s == "hi"
         ));
     }
 
     #[test]
-    fn key_to_action_mapping_matrix_covers_nontrivial_branches() {
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('d'), KeyModifiers::CONTROL), false, "hi"),
-            Action::Quit
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::PageUp, KeyModifiers::NONE), false, "hi"),
-            Action::PageUp
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::PageDown, KeyModifiers::NONE), false, "hi"),
-            Action::PageDown
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Down, KeyModifiers::CONTROL), false, "hi"),
-            Action::ScrollDown
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Tab, KeyModifiers::NONE), false, "hi"),
-            Action::Complete
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Backspace, KeyModifiers::SUPER), false, "hi"),
-            Action::DeleteToBufferHome
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Backspace, KeyModifiers::CONTROL), false, "hi"),
-            Action::DeleteToBufferHome
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Backspace, KeyModifiers::ALT), false, "hi"),
-            Action::DeleteWordLeft
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Backspace, KeyModifiers::NONE), false, "hi"),
-            Action::Backspace
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Delete, KeyModifiers::SUPER), false, "hi"),
-            Action::DeleteToLineEnd
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Delete, KeyModifiers::ALT), false, "hi"),
-            Action::DeleteWordRight
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Delete, KeyModifiers::NONE), false, "hi"),
-            Action::Delete
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Home, KeyModifiers::NONE), false, "hi"),
-            Action::Home
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::End, KeyModifiers::NONE), false, "hi"),
-            Action::End
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('b'), KeyModifiers::ALT), false, "hi"),
-            Action::WordLeft
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('B'), KeyModifiers::ALT), false, "hi"),
-            Action::WordLeft
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('f'), KeyModifiers::ALT), false, "hi"),
-            Action::WordRight
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('F'), KeyModifiers::ALT), false, "hi"),
-            Action::WordRight
-        ));
-    }
-
-    #[test]
-    fn running_turn_allows_only_interrupt_quit_scroll_and_alt_word_aliases() {
-        assert!(matches!(
-            key_to_action(key(KeyCode::Esc, KeyModifiers::NONE), true, "hi"),
-            Action::AbortTurn
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('c'), KeyModifiers::CONTROL), true, "hi"),
-            Action::CtrlC
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('d'), KeyModifiers::CONTROL), true, "hi"),
-            Action::Quit
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::PageUp, KeyModifiers::NONE), true, "hi"),
-            Action::PageUp
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::PageDown, KeyModifiers::NONE), true, "hi"),
-            Action::PageDown
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Up, KeyModifiers::CONTROL), true, "hi"),
-            Action::ScrollUp
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Down, KeyModifiers::CONTROL), true, "hi"),
-            Action::ScrollDown
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('b'), KeyModifiers::ALT), true, "hi"),
-            Action::WordLeft
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('f'), KeyModifiers::ALT), true, "hi"),
-            Action::WordRight
-        ));
-
-        assert!(matches!(
-            key_to_action(key(KeyCode::Enter, KeyModifiers::NONE), true, "hi"),
-            Action::None
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Tab, KeyModifiers::NONE), true, "hi"),
-            Action::None
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Left, KeyModifiers::NONE), true, "hi"),
-            Action::None
-        ));
-        assert!(matches!(
-            key_to_action(key(KeyCode::Char('x'), KeyModifiers::NONE), true, "hi"),
-            Action::None
-        ));
+    fn running_turn_suppresses_unsupported_keys() {
+        for (code, modifiers) in [
+            (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::Tab, KeyModifiers::NONE),
+            (KeyCode::Left, KeyModifiers::NONE),
+            (KeyCode::Char('x'), KeyModifiers::NONE),
+            (KeyCode::Backspace, KeyModifiers::NONE),
+            (KeyCode::Delete, KeyModifiers::NONE),
+        ] {
+            assert!(matches!(
+                key_to_action(key(code, modifiers), true, "hi"),
+                Action::None
+            ));
+        }
     }
 
     #[test]
