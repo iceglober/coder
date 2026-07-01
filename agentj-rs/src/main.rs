@@ -18,6 +18,7 @@ mod tui;
 use events::AgentEvent;
 use model::{preflight, resolve_model, resolve_provider, Provider, Selector};
 use provider::{ChatMessage, Llm};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tools::Tools;
@@ -189,6 +190,11 @@ async fn main() {
 
     let jobs = jobs::JobManager::new(root.clone());
     let tools = Tools::new(PathBuf::from(&root), jobs.clone(), mcp_clients);
+
+    if !std::io::stdin().is_terminal() && args.once.is_none() {
+        eprintln!("stdin is not a terminal; interactive chat needs a TTY. Use --once \"<task>\" for headless runs.");
+        std::process::exit(1);
+    }
 
     if let Some(task) = args.once {
         // Headless one-shot: run a turn, print events to stdout, exit on the result.
