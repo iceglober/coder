@@ -277,8 +277,6 @@ enum Action {
     Down,
     Home,
     End,
-    BufferHome,
-    BufferEnd,
     Complete,
     AbortTurn,
     /// Ctrl-C — quit on a double-tap; the loop tracks the timing.
@@ -317,8 +315,8 @@ fn key_to_action(k: KeyEvent, running: bool, input: &str) -> Action {
         KeyCode::Backspace if super_ => Action::DeleteToBufferHome,
         KeyCode::Backspace if no_mods => Action::Backspace,
         KeyCode::Delete if no_mods => Action::Delete,
-        KeyCode::Left if super_ => Action::BufferHome,
-        KeyCode::Right if super_ => Action::BufferEnd,
+        KeyCode::Left if super_ => Action::Home,
+        KeyCode::Right if super_ => Action::End,
         KeyCode::Left if alt => Action::WordLeft,
         KeyCode::Right if alt => Action::WordRight,
         KeyCode::Left if no_mods => Action::Left,
@@ -490,7 +488,7 @@ pub async fn run(
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(system.clone())];
     let mut transcript: Vec<Line<'static>> = vec![
         dim_line(format!("agentj · {model_id} · {root}")),
-        dim_line("Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = newline · ⌥←/→ skip words · ⌘←/→ start/end · ←/→/↑/↓ move cursor · mouse wheel/PageUp/Dn or Ctrl+↑/↓ scroll · /task <pr|branch> · Esc interrupts a turn · Ctrl-C twice (or Ctrl-D / /exit) quits"),
+        dim_line("Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = newline · ⌥←/→ skip words · ⌘←/→ line start/end · ←/→/↑/↓ move cursor · mouse wheel/PageUp/Dn or Ctrl+↑/↓ scroll · /task <pr|branch> · Esc interrupts a turn · Ctrl-C twice (or Ctrl-D / /exit) quits"),
     ];
     for n in &notices {
         transcript.push(dim_line(format!("! {n}")));
@@ -647,8 +645,6 @@ pub async fn run(
                             Action::Down => editor.down(),
                             Action::Home => editor.home(),
                             Action::End => editor.end(),
-                            Action::BufferHome => editor.buffer_home(),
-                            Action::BufferEnd => editor.buffer_end(),
                             Action::ScrollUp => { follow = false; scroll = scroll.saturating_sub(1); }
                             Action::ScrollDown => { scroll = scroll.saturating_add(1); }
                             Action::PageUp => { follow = false; scroll = scroll.saturating_sub(10); }
@@ -943,7 +939,7 @@ mod tests {
             ),
             Action::Char(':')
         ));
-        // Arrows move the cursor; Alt+arrows jump by word; Cmd/Super+arrows jump to buffer edges.
+        // Arrows move the cursor; Alt+arrows jump by word; Cmd/Super+arrows jump to line edges.
         assert!(matches!(
             key_to_action(plain(KeyCode::Left), false, "hi"),
             Action::Left
@@ -970,7 +966,7 @@ mod tests {
                 false,
                 "hi"
             ),
-            Action::BufferHome
+            Action::Home
         ));
         assert!(matches!(
             key_to_action(
@@ -978,7 +974,7 @@ mod tests {
                 false,
                 "hi"
             ),
-            Action::BufferEnd
+            Action::End
         ));
         // Typing is ignored mid-turn, but Esc interrupts, Ctrl-C signals quit, and Ctrl+↑ scrolls.
         assert!(matches!(
