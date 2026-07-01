@@ -330,6 +330,7 @@ fn key_to_action(k: KeyEvent, running: bool, input: &str) -> Action {
         KeyCode::Char(c) if alt && matches!(c, 'b' | 'B') => Action::WordLeft,
         KeyCode::Char(c) if alt && matches!(c, 'f' | 'F') => Action::WordRight,
         KeyCode::Char(c) if !ctrl && !alt && !super_ => Action::Char(c),
+        KeyCode::Char(c) if shift && !ctrl && !alt && !super_ => Action::Char(c),
         _ => Action::None,
     }
 }
@@ -909,7 +910,7 @@ mod tests {
         assert!(
             matches!(key_to_action(plain(KeyCode::Enter), false, "hi"), Action::Submit(s) if s == "hi")
         );
-        // Shift+Enter and Ctrl-J insert a newline.
+        // Shift+Enter and Ctrl-J insert a newline, but shifted printable chars still type normally.
         assert!(matches!(
             key_to_action(
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
@@ -925,6 +926,22 @@ mod tests {
                 "hi"
             ),
             Action::Newline
+        ));
+        assert!(matches!(
+            key_to_action(
+                KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+                false,
+                "hi"
+            ),
+            Action::Char('A')
+        ));
+        assert!(matches!(
+            key_to_action(
+                KeyEvent::new(KeyCode::Char(':'), KeyModifiers::SHIFT),
+                false,
+                "hi"
+            ),
+            Action::Char(':')
         ));
         // Arrows move the cursor; Alt+arrows jump by word; Cmd/Super+arrows jump to buffer edges.
         assert!(matches!(
