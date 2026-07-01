@@ -40,6 +40,8 @@ const MAX_INPUT_ROWS: u16 = 8;
 const EFFECT_TTL: Duration = Duration::from_millis(700);
 /// A second Ctrl-C within this window quits.
 const DOUBLE_TAP: Duration = Duration::from_secs(2);
+const KEYBOARD_FLAGS: KeyboardEnhancementFlags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+    .union(KeyboardEnhancementFlags::REPORT_EVENT_TYPES);
 
 // ── a small cursor-tracked, multi-line text buffer ──
 // `cursor` is a byte index into `text`, always kept on a char boundary.
@@ -471,15 +473,12 @@ pub async fn run(
         EnableBracketedPaste,
         EnableMouseCapture
     )?;
-    // Ask for progressive keyboard reporting so Shift/Ctrl/Alt+Enter are distinguishable where the
-    // terminal supports it (kitty/ghostty/wezterm/newer iTerm2); a no-op elsewhere.
+    // Ask for progressive keyboard reporting so modified Enter/Esc are distinguishable where the
+    // terminal supports it (kitty/ghostty/wezterm/newer iTerm2); avoid forcing all keys into CSI-u
+    // reporting because some terminals/consumer stacks handle printable shifted keys poorly there.
     let _ = execute!(
         stdout,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-        )
+        PushKeyboardEnhancementFlags(KEYBOARD_FLAGS)
     );
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
@@ -931,9 +930,17 @@ mod tests {
         assert!(
             matches!(key_to_action(plain(KeyCode::Enter), false, "hi"), Action::Submit(s) if s == "hi")
         );
-        // Shift+Enter and Ctrl-J insert a newline, but shifted printable chars still type normally.
+        // Shift/Alt/Ctrl+Enter and Ctrl-J insert a newline, but shifted printable chars still type normally.
         assert!(matches!(
             key_to_action(key(KeyCode::Enter, KeyModifiers::SHIFT), false, "hi"),
+            Action::Newline
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Enter, KeyModifiers::ALT), false, "hi"),
+            Action::Newline
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Enter, KeyModifiers::CONTROL), false, "hi"),
             Action::Newline
         ));
         assert!(matches!(
@@ -947,6 +954,14 @@ mod tests {
         assert!(matches!(
             key_to_action(key(KeyCode::Char(':'), KeyModifiers::SHIFT), false, "hi"),
             Action::Char(':')
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('!'), KeyModifiers::SHIFT), false, "hi"),
+            Action::Char('!')
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('('), KeyModifiers::SHIFT), false, "hi"),
+            Action::Char('(')
         ));
         // Arrows move the cursor; Alt+arrows jump by word; Cmd/Super+arrows jump to line edges.
         assert!(matches!(
@@ -1141,6 +1156,26 @@ mod tests {
         apply_key(&mut ctrl_enter, key(KeyCode::Enter, KeyModifiers::CONTROL), false);
         apply_key(&mut ctrl_enter, key(KeyCode::Char('q'), KeyModifiers::NONE), false);
         assert_eq!(ctrl_enter.text(), "p\nq");
+    }
+
+    #[test]
+    fn shifted_printable_keystroke_sequence_preserves_text_entry() {
+        let mut e = Editor::default();
+        apply_key(&mut e, key(KeyCode::Char('A'), KeyModifiers::SHIFT), false);
+        apply_key(&mut e, key(KeyCode::Char(':'), KeyModifiers::SHIFT), false);
+        apply_key(&mut e, key(KeyCode::Char('!'), KeyModifiers::SHIFT), false);
+        apply_key(&mut e, key(KeyCode::Char('('), KeyModifiers::SHIFT), false);
+        assert_eq!(e.text(), "A:!(");
+
+        let submitted = apply_key(&mut e, key(KeyCode::Enter, KeyModifiers::NONE), false);
+        assert!(matches!(submitted, Action::Submit(s) if s == "A:!("));
+    }
+
+    #[test]
+    fn keyboard_flags_request_only_needed_progressive_reporting() {
+        assert!(KEYBOARD_FLAGS.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(KEYBOARD_FLAGS.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(!KEYBOARD_FLAGS.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     }
 
     #[test]
