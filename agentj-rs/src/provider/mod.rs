@@ -74,10 +74,21 @@ pub struct AssistantTurn {
     pub finish_reason: String,
 }
 
+/// A scripted model step for tests: hand the loop a canned turn, an error, or a panic.
+#[cfg(test)]
+pub enum ScriptStep {
+    Turn(AssistantTurn),
+    Err(String),
+    Panic,
+}
+
 /// The resolved provider. An enum (not a trait) so we avoid an async-trait dep; new variants land as
 /// vertex/anthropic are wired.
 pub enum Llm {
     OpenAi(OpenAiProvider),
+    /// A test seam: pops scripted steps so the agent loop is exercisable without a network.
+    #[cfg(test)]
+    Script(std::sync::Mutex<std::collections::VecDeque<ScriptStep>>),
 }
 
 impl Llm {
@@ -98,6 +109,18 @@ impl Llm {
     ) -> anyhow::Result<AssistantTurn> {
         match self {
             Llm::OpenAi(p) => p.chat(messages, tools).await,
+            #[cfg(test)]
+            Llm::Script(steps) => {
+                // Pop under the lock, then release it before acting — so a scripted panic doesn't
+                // poison the mutex for later steps.
+                let step = steps.lock().unwrap().pop_front();
+                match step {
+                    Some(ScriptStep::Turn(t)) => Ok(t),
+                    Some(ScriptStep::Err(e)) => anyhow::bail!("{e}"),
+                    Some(ScriptStep::Panic) => panic!("scripted subagent panic"),
+                    None => anyhow::bail!("script exhausted"),
+                }
+            }
         }
     }
 }

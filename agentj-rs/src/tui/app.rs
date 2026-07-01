@@ -376,6 +376,28 @@ impl App {
                 self.status = "thinking".to_string();
                 self.set_effect(format!("done in {}", fmt_ms(elapsed_ms)));
             }
+            AgentEvent::SubagentStart { id, desc } => {
+                self.transcript.push(dim_line(format!("↳[{id}] {desc}")));
+                self.dirty = true;
+            }
+            AgentEvent::SubagentProgress { id, status } => {
+                self.transcript
+                    .push(dim_line(format!("↳[{id}] {status}")));
+                self.dirty = true;
+            }
+            AgentEvent::SubagentEnd {
+                id,
+                ok,
+                summary,
+                elapsed_ms,
+            } => {
+                let mark = if ok { "done" } else { "failed" };
+                self.transcript.push(dim_line(format!(
+                    "↳[{id}] {mark} in {} — {summary}",
+                    fmt_ms(elapsed_ms as u128)
+                )));
+                self.dirty = true;
+            }
             AgentEvent::Note(t) => {
                 self.transcript.push(dim_line(format!("» {t}")));
                 self.dirty = true;

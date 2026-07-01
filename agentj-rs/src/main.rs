@@ -224,6 +224,17 @@ async fn main() {
                     elapsed_ms,
                     ..
                 } => println!("  → {summary} ({elapsed_ms}ms)"),
+                AgentEvent::SubagentStart { id, desc } => println!("↳[{id}] {desc}"),
+                AgentEvent::SubagentProgress { id, status } => println!("↳[{id}] {status}"),
+                AgentEvent::SubagentEnd {
+                    id,
+                    ok,
+                    summary,
+                    elapsed_ms,
+                } => println!(
+                    "↳[{id}] {} ({elapsed_ms}ms) — {summary}",
+                    if ok { "done" } else { "FAILED" }
+                ),
                 AgentEvent::Note(t) => println!("» {t}"),
                 AgentEvent::Error(e) => {
                     eprintln!("[error] {e}");

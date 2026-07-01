@@ -14,6 +14,17 @@ pub enum AgentEvent {
         elapsed_ms: u128,
         summary: String,
     },
+    /// A subagent (delegate sub-task) started. `id` is its 0-based index in the batch.
+    SubagentStart { id: usize, desc: String },
+    /// A subagent made progress — its current tool call or the latest message snippet.
+    SubagentProgress { id: usize, status: String },
+    /// A subagent finished. `ok` is false when it errored or its task panicked.
+    SubagentEnd {
+        id: usize,
+        ok: bool,
+        summary: String,
+        elapsed_ms: u64,
+    },
     /// A supervisor/lifecycle note (auto-continue, hit the cap, …).
     Note(String),
     /// A hard error ended the turn.
