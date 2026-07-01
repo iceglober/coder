@@ -328,7 +328,6 @@ fn key_to_action(k: KeyEvent, running: bool, input: &str) -> Action {
         KeyCode::Char(c) if alt && matches!(c, 'b' | 'B') => Action::WordLeft,
         KeyCode::Char(c) if alt && matches!(c, 'f' | 'F') => Action::WordRight,
         KeyCode::Char(c) if !ctrl && !alt && !super_ => Action::Char(c),
-        KeyCode::Char(c) if shift && !ctrl && !alt && !super_ => Action::Char(c),
         _ => Action::None,
     }
 }
