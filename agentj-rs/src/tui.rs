@@ -427,16 +427,64 @@ fn line_width(line: &Line<'_>) -> usize {
         .sum::<usize>()
 }
 
-fn transcript_rows(lines: &[Line<'_>], width: u16) -> usize {
+fn wrapped_rows_for_line(line: &Line<'_>, width: u16) -> usize {
     let content_width = width.saturating_sub(2).max(1) as usize;
-    lines
-        .iter()
-        .map(|line| line_width(line).max(1).div_ceil(content_width))
-        .sum()
+    line_width(line).max(1).div_ceil(content_width)
 }
 
-fn max_scroll(lines: &[Line<'_>], width: u16, viewport: u16) -> u16 {
-    transcript_rows(lines, width).saturating_sub(viewport as usize) as u16
+fn transcript_rows(lines: &[Line<'_>], width: u16) -> usize {
+    lines.iter().map(|line| wrapped_rows_for_line(line, width)).sum()
+}
+
+struct TranscriptView {
+    lines: Vec<Line<'static>>,
+    text: Text<'static>,
+    total_rows: usize,
+    cached_width: u16,
+}
+
+impl TranscriptView {
+    fn new(lines: Vec<Line<'static>>) -> Self {
+        let text = Text::from(lines.clone());
+        Self {
+            lines,
+            text,
+            total_rows: 0,
+            cached_width: 0,
+        }
+    }
+
+    fn text(&self) -> Text<'static> {
+        self.text.clone()
+    }
+
+    fn ensure_width(&mut self, width: u16) {
+        if self.cached_width != width {
+            self.cached_width = width;
+            self.total_rows = transcript_rows(&self.lines, width);
+        }
+    }
+
+    fn max_scroll(&self, viewport: u16) -> u16 {
+        self.total_rows.saturating_sub(viewport as usize) as u16
+    }
+
+    fn push(&mut self, line: Line<'static>) {
+        if self.cached_width != 0 {
+            self.total_rows += wrapped_rows_for_line(&line, self.cached_width);
+        }
+        self.text.lines.push(line.clone());
+        self.lines.push(line);
+    }
+
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = Line<'static>>,
+    {
+        for line in iter {
+            self.push(line);
+        }
+    }
 }
 
 fn pulse_color(_frame: usize, running: bool) -> Color {
@@ -518,10 +566,10 @@ pub async fn run(
     let llm = Arc::new(llm);
     let tools = Arc::new(tools);
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(system.clone())];
-    let mut transcript: Vec<Line<'static>> = vec![
+    let mut transcript = TranscriptView::new(vec![
         dim_line(format!("agentj · {model_id} · {root}")),
         dim_line("Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = newline · ⌥←/→ skip words · ⌘←/→ line start/end · ←/→/↑/↓ move cursor · mouse wheel/PageUp/Dn or Ctrl+↑/↓ scroll · /task <pr|branch> · Esc interrupts a turn · Ctrl-C twice (or Ctrl-D / /exit) quits"),
-    ];
+    ]);
     for n in &notices {
         transcript.push(dim_line(format!("! {n}")));
     }
@@ -568,7 +616,8 @@ pub async fn run(
 
             // Transcript (with a bottom divider). Auto-follow the tail unless the user scrolled up.
             let viewport = rows[0].height.saturating_sub(1); // minus the border row
-            let max = max_scroll(&transcript, rows[0].width, viewport);
+            transcript.ensure_width(rows[0].width);
+            let max = transcript.max_scroll(viewport);
             if follow {
                 scroll = max;
             }
@@ -576,7 +625,7 @@ pub async fn run(
             let accent = pulse_color(pulse, running);
             let divider = divider_color(running);
             f.render_widget(
-                Paragraph::new(Text::from(transcript.clone()))
+                Paragraph::new(transcript.text())
                     .block(
                         Block::default()
                             .borders(Borders::BOTTOM)
@@ -1085,8 +1134,11 @@ mod tests {
             Line::from("1234567890"),
             Line::from("tiny"),
         ];
+        assert_eq!(wrapped_rows_for_line(&transcript[0], 5), 4);
         assert_eq!(transcript_rows(&transcript, 5), 10);
-        assert_eq!(max_scroll(&transcript, 5, 3), 7);
+        let mut view = TranscriptView::new(transcript);
+        view.ensure_width(5);
+        assert_eq!(view.max_scroll(3), 7);
     }
 
     #[test]
