@@ -342,7 +342,7 @@ fn key_to_action(k: KeyEvent, running: bool, input: &str) -> Action {
         KeyCode::Char('j') if ctrl => Action::Newline,
         KeyCode::Enter => Action::Submit(input.trim().to_string()),
         KeyCode::Tab if no_mods => Action::Complete,
-        KeyCode::Backspace if super_ => Action::DeleteToBufferHome,
+        KeyCode::Backspace if super_ || (ctrl && !alt && !shift) => Action::DeleteToBufferHome,
         KeyCode::Backspace if alt => Action::DeleteWordLeft,
         KeyCode::Backspace if no_mods => Action::Backspace,
         KeyCode::Delete if super_ => Action::DeleteToLineEnd,
@@ -1072,6 +1072,10 @@ mod tests {
         ));
         assert!(matches!(
             key_to_action(key(KeyCode::Backspace, KeyModifiers::SUPER), false, "hi"),
+            Action::DeleteToBufferHome
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Backspace, KeyModifiers::CONTROL), false, "hi"),
             Action::DeleteToBufferHome
         ));
         assert!(matches!(
