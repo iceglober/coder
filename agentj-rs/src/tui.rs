@@ -38,6 +38,8 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const DIM: Color = Color::DarkGray;
 const MAX_INPUT_ROWS: u16 = 8;
 const EFFECT_TTL: Duration = Duration::from_millis(700);
+/// A second Ctrl-C within this window quits.
+const DOUBLE_TAP: Duration = Duration::from_secs(2);
 
 // ── a small cursor-tracked, multi-line text buffer ──
 // `cursor` is a byte index into `text`, always kept on a char boundary.
@@ -272,6 +274,8 @@ enum Action {
     BufferEnd,
     Complete,
     AbortTurn,
+    /// Ctrl-C — quit on a double-tap; the loop tracks the timing.
+    CtrlC,
     Submit(String),
     ScrollUp,
     ScrollDown,
@@ -285,16 +289,9 @@ fn key_to_action(k: KeyEvent, running: bool, input: &str) -> Action {
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
     let super_ = k.modifiers.contains(KeyModifiers::SUPER);
     match k.code {
-        // These work during a turn too (abort / scroll).
-        KeyCode::Char('c') if ctrl => {
-            if running {
-                Action::AbortTurn
-            } else if input.is_empty() {
-                Action::Quit
-            } else {
-                Action::ClearInput
-            }
-        }
+        // These work during a turn too (interrupt / quit / scroll).
+        KeyCode::Esc if running => Action::AbortTurn, // Esc interrupts the running turn
+        KeyCode::Char('c') if ctrl => Action::CtrlC,  // twice = quit (loop tracks the double-tap)
         KeyCode::Char('d') if ctrl => Action::Quit,
         KeyCode::PageUp => Action::PageUp,
         KeyCode::PageDown => Action::PageDown,
@@ -302,6 +299,7 @@ fn key_to_action(k: KeyEvent, running: bool, input: &str) -> Action {
         KeyCode::Down if ctrl => Action::ScrollDown,
         // Below here: ignored while a turn runs.
         _ if running => Action::None,
+        KeyCode::Esc => Action::ClearInput, // idle: Esc clears the input line
         // Newline chords for multi-line input (Enter alone submits).
         KeyCode::Enter if alt || shift || ctrl => Action::Newline,
         KeyCode::Char('j') if ctrl => Action::Newline,
@@ -476,7 +474,7 @@ pub async fn run(
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(system.clone())];
     let mut transcript: Vec<Line<'static>> = vec![
         dim_line(format!("agentj · {model_id} · {root}")),
-        dim_line("Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = newline · ⌥←/→ skip words · ⌘←/→ start/end · ←/→/↑/↓ move cursor · mouse wheel/PageUp/Dn or Ctrl+↑/↓ scroll · /task <pr|branch> · Ctrl-C interrupts · Ctrl-D or /exit quits"),
+        dim_line("Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = newline · ⌥←/→ skip words · ⌘←/→ start/end · ←/→/↑/↓ move cursor · mouse wheel/PageUp/Dn or Ctrl+↑/↓ scroll · /task <pr|branch> · Esc interrupts a turn · Ctrl-C twice (or Ctrl-D / /exit) quits"),
     ];
     for n in &notices {
         transcript.push(dim_line(format!("! {n}")));
@@ -490,6 +488,7 @@ pub async fn run(
     let mut since = Instant::now();
     let mut effect_until: Option<Instant> = None;
     let mut effect_label = String::new();
+    let mut last_ctrl_c: Option<Instant> = None; // for the Ctrl-C-twice-to-quit gesture
     let mut turn_abort: Option<tokio::task::AbortHandle> = None;
     let mut scroll = 0u16;
     let mut follow = true; // stick to the bottom until the user scrolls up
@@ -655,6 +654,17 @@ pub async fn run(
                                 effect_label = "interrupted".to_string();
                                 transcript.push(dim_line("[interrupted]"));
                                 follow = true;
+                            }
+                            Action::CtrlC => {
+                                let now = Instant::now();
+                                if last_ctrl_c.is_some_and(|t| now.duration_since(t) < DOUBLE_TAP) {
+                                    quit = true; // second Ctrl-C within the window → quit
+                                } else {
+                                    last_ctrl_c = Some(now);
+                                    editor.clear(); // first Ctrl-C also clears any typed input
+                                    effect_until = Some(now + DOUBLE_TAP);
+                                    effect_label = "press Ctrl-C again to quit".to_string();
+                                }
                             }
                             Action::Submit(text) => {
                                 editor.clear();
@@ -937,10 +947,18 @@ mod tests {
             ),
             Action::BufferEnd
         ));
-        // Typing is ignored mid-turn, but Ctrl-C still aborts and Ctrl+↑ still scrolls.
+        // Typing is ignored mid-turn, but Esc interrupts, Ctrl-C signals quit, and Ctrl+↑ scrolls.
         assert!(matches!(
             key_to_action(plain(KeyCode::Char('x')), true, ""),
             Action::None
+        ));
+        assert!(matches!(
+            key_to_action(plain(KeyCode::Esc), true, ""),
+            Action::AbortTurn
+        ));
+        assert!(matches!(
+            key_to_action(plain(KeyCode::Esc), false, "hi"),
+            Action::ClearInput
         ));
         assert!(matches!(
             key_to_action(
@@ -948,7 +966,7 @@ mod tests {
                 true,
                 ""
             ),
-            Action::AbortTurn
+            Action::CtrlC
         ));
         assert!(matches!(
             key_to_action(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), true, ""),
