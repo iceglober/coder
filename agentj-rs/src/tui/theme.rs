@@ -9,6 +9,10 @@ pub const ACCENT: Color = Color::Cyan; // spinner, exact slash command, headings
 pub const DIM: Color = Color::DarkGray; // chrome: bullets, tool lines, notes, dividers, hints
 pub const MUTED: Color = Color::Gray; // secondary text a step above DIM
 pub const ERROR: Color = Color::Red; // errors, unknown slash command, ✗
+pub const SUCCESS: Color = Color::Green; // ✓ (subagent/tool ok)
+pub const WARN: Color = Color::Yellow; // context meter near full
+pub const CODE: Color = Color::Yellow; // inline code
+pub const CODE_BLOCK: Color = Color::Gray; // fenced code body (verbatim)
 
 pub fn dim() -> Style {
     Style::default().fg(DIM)
@@ -24,6 +28,9 @@ pub fn accent_bold() -> Style {
 }
 pub fn err() -> Style {
     Style::default().fg(ERROR)
+}
+pub fn ok() -> Style {
+    Style::default().fg(SUCCESS)
 }
 
 /// Accent while a turn is running, gray at rest.

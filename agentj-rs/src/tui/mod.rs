@@ -5,6 +5,7 @@
 mod app;
 mod editor;
 mod keymap;
+mod markdown;
 mod theme;
 mod view;
 
@@ -85,7 +86,7 @@ pub async fn run(
     let _ = execute!(stdout, PushKeyboardEnhancementFlags(KEYBOARD_FLAGS));
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let mut app = App::new(&model_id, root, system, &notices);
+    let mut app = App::new(&model_id, root, system, sess.cfg.context_window, &notices);
 
     let (ui_tx, mut ui_rx) = unbounded_channel::<UiMsg>();
     let (in_tx, mut in_rx) = unbounded_channel::<Event>();

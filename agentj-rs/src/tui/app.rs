@@ -4,14 +4,16 @@
 
 use super::editor::Editor;
 use super::keymap::{key_to_action, Action};
-use super::view::{assistant_lines, dim_line, fmt_ms, InputLayoutCache, TranscriptView};
 use super::theme;
+use super::view::{assistant_block, dim_line, fmt_ms, tool_end_line, InputLayoutCache, TranscriptView};
 use crate::commands::{complete_command, SLASH_COMMANDS};
 use crate::events::AgentEvent;
-use crate::provider::ChatMessage;
+use crate::provider::{ChatMessage, TokenUsage};
 use crate::rekey::{is_linked_worktree, RekeyResult};
 use crossterm::event::{Event, KeyEvent, KeyEventKind, MouseEventKind};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use tokio::task::AbortHandle;
 
@@ -19,7 +21,7 @@ const EFFECT_TTL: Duration = Duration::from_millis(700);
 /// A second Ctrl-C within this window quits.
 const DOUBLE_TAP: Duration = Duration::from_secs(2);
 
-const CHEAT_SHEET: &str = "Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = newline · ⌥←/→ skip words · ⌘←/→ line start/end · ←/→/↑/↓ move cursor · mouse wheel/PageUp/Dn or Ctrl+↑/↓ scroll · /task <pr|branch> · Esc interrupts a turn · Ctrl-C twice (or Ctrl-D / /exit) quits";
+const CHEAT_SHEET: &str = "Enter send · Ctrl-J newline · Esc interrupt · Tab complete · mouse/PageUp-Dn scroll · Ctrl-C×2 quit · type / for commands";
 
 /// Messages from the turn task into the UI event loop.
 pub enum UiMsg {
@@ -36,6 +38,13 @@ pub enum UiMsg {
 pub struct TurnHandle {
     pub abort: AbortHandle,
     pub job_watermark: u64,
+}
+
+/// One live subagent's row in the panel shown while a delegate batch runs.
+pub struct SubagentRow {
+    pub desc: String,
+    pub status: String,
+    pub started: Instant,
 }
 
 /// Work the event loop must perform after a state transition (it needs `.await` or the turn task's
@@ -55,6 +64,7 @@ pub struct App {
     // context for building turns / re-keying
     pub system: String,
     pub root: String,
+    pub model_id: String,
     // conversation
     pub messages: Vec<ChatMessage>,
     pub transcript: TranscriptView,
@@ -67,6 +77,12 @@ pub struct App {
     pub since: Instant,
     pub status: String,
     pub current_tool: String,
+    // live subagents (delegate batch), keyed by index for stable ordering
+    pub subagents: BTreeMap<usize, SubagentRow>,
+    // session status meter
+    pub session_start: Instant,
+    pub last_usage: Option<TokenUsage>,
+    pub context_window: Option<u64>,
     // animation / effects
     pub spinner: usize,
     pub pulse: usize,
@@ -83,7 +99,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(model_id: &str, root: String, system: String, notices: &[String]) -> Self {
+    pub fn new(
+        model_id: &str,
+        root: String,
+        system: String,
+        context_window: Option<u64>,
+        notices: &[String],
+    ) -> Self {
         let mut transcript = TranscriptView::new(vec![
             dim_line(format!("agentj · {model_id} · {root}")),
             dim_line(CHEAT_SHEET),
@@ -94,6 +116,7 @@ impl App {
         Self {
             system: system.clone(),
             root,
+            model_id: model_id.to_string(),
             messages: vec![ChatMessage::system(system)],
             transcript,
             editor: Editor::default(),
@@ -103,6 +126,10 @@ impl App {
             since: Instant::now(),
             status: String::new(),
             current_tool: String::new(),
+            subagents: BTreeMap::new(),
+            session_start: Instant::now(),
+            last_usage: None,
+            context_window,
             spinner: 0,
             pulse: 0,
             effect_until: None,
@@ -122,6 +149,15 @@ impl App {
 
     pub fn effect_active(&self) -> bool {
         self.effect_until.is_some_and(|until| until > Instant::now())
+    }
+
+    /// Push a user prompt line, preceded by a blank line to separate turns visually.
+    fn push_user_line(&mut self, text: &str) {
+        self.transcript.push(Line::default());
+        self.transcript.push(Line::from(vec![
+            Span::styled("› ", theme::accent()),
+            Span::styled(text.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+        ]));
     }
 
     fn set_effect(&mut self, label: impl Into<String>) {
@@ -249,6 +285,7 @@ impl App {
     fn abort_turn(&mut self) -> AppEffect {
         self.running = false;
         self.status.clear();
+        self.subagents.clear();
         self.transcript.push(dim_line("[interrupted]"));
         self.follow = true;
         self.set_effect("interrupted");
@@ -291,7 +328,7 @@ impl App {
         } else if text == "/task" || text.starts_with("/task ") {
             self.submit_task(&text)
         } else {
-            self.transcript.push(Line::from(format!("› {text}")));
+            self.push_user_line(&text);
             self.messages.push(ChatMessage::user(text));
             self.running = true;
             self.since = Instant::now();
@@ -344,7 +381,7 @@ impl App {
         if desc.is_empty() {
             AppEffect::None
         } else {
-            self.transcript.push(Line::from(format!("› {desc}")));
+            self.push_user_line(&desc);
             self.messages.push(ChatMessage::user(desc));
             self.running = true;
             self.since = Instant::now();
@@ -365,6 +402,7 @@ impl App {
                 self.running = false;
                 self.status.clear();
                 self.turn = None;
+                self.subagents.clear();
                 if self.effect_label.is_empty() {
                     self.effect_until = Some(Instant::now() + EFFECT_TTL);
                     self.effect_label = "all set".to_string();
@@ -378,34 +416,46 @@ impl App {
     fn on_agent(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::Message(t) => {
-                self.transcript.extend(assistant_lines(&t));
+                self.transcript.extend(assistant_block(&t));
                 self.set_effect("new reply");
             }
             AgentEvent::ToolStart { name, args, .. } => {
                 self.current_tool = format!("{name}({args})");
-                self.status = self.current_tool.clone();
+                // The subagent panel is the live status for delegate; don't overwrite it.
+                if name != "delegate" {
+                    self.status = self.current_tool.clone();
+                }
                 self.set_effect(format!("tool: {name}"));
             }
             AgentEvent::ToolEnd {
+                ok,
                 summary,
                 elapsed_ms,
                 ..
             } => {
-                self.transcript.push(dim_line(format!(
-                    "· {} — {} {summary}",
-                    self.current_tool,
-                    fmt_ms(elapsed_ms)
-                )));
+                // The delegate summary is redundant with the per-subagent ✓/✗ lines already shown.
+                let is_delegate = self.current_tool.starts_with("delegate(");
+                let shown = if is_delegate { "" } else { summary.as_str() };
+                self.transcript
+                    .push(tool_end_line(&self.current_tool, ok, elapsed_ms, shown));
                 self.status = "thinking".to_string();
                 self.set_effect(format!("done in {}", fmt_ms(elapsed_ms)));
             }
             AgentEvent::SubagentStart { id, desc } => {
-                self.transcript.push(dim_line(format!("↳[{id}] {desc}")));
+                self.subagents.insert(
+                    id,
+                    SubagentRow {
+                        desc,
+                        status: "starting".to_string(),
+                        started: Instant::now(),
+                    },
+                );
                 self.dirty = true;
             }
             AgentEvent::SubagentProgress { id, status } => {
-                self.transcript
-                    .push(dim_line(format!("↳[{id}] {status}")));
+                if let Some(row) = self.subagents.get_mut(&id) {
+                    row.status = status;
+                }
                 self.dirty = true;
             }
             AgentEvent::SubagentEnd {
@@ -414,21 +464,34 @@ impl App {
                 summary,
                 elapsed_ms,
             } => {
-                let mark = if ok { "done" } else { "failed" };
-                self.transcript.push(dim_line(format!(
-                    "↳[{id}] {mark} in {} — {summary}",
-                    fmt_ms(elapsed_ms as u128)
-                )));
+                let desc = self.subagents.remove(&id).map(|r| r.desc).unwrap_or_default();
+                let (glyph, style) = if ok {
+                    ("✓", theme::ok())
+                } else {
+                    ("✗", theme::err())
+                };
+                let mut spans = vec![
+                    Span::styled(format!("{glyph} "), style),
+                    Span::styled(format!("[{id}] {desc}"), theme::muted()),
+                    Span::styled(format!(" — {}", fmt_ms(elapsed_ms as u128)), theme::dim()),
+                ];
+                if !summary.trim().is_empty() {
+                    spans.push(Span::styled(format!(" · {summary}"), theme::dim()));
+                }
+                self.transcript.push(Line::from(spans));
                 self.dirty = true;
             }
-            AgentEvent::Usage(_) => {} // surfaced in the status line — wired in the visual pass
+            AgentEvent::Usage(u) => {
+                self.last_usage = Some(u);
+                self.dirty = true;
+            }
             AgentEvent::Note(t) => {
                 self.transcript.push(dim_line(format!("» {t}")));
                 self.dirty = true;
             }
             AgentEvent::Error(e) => {
                 self.transcript
-                    .push(Line::from(Span::styled(format!("[error] {e}"), theme::err())));
+                    .push(Line::from(Span::styled(format!("✗ {e}"), theme::err())));
                 self.set_effect("error");
             }
             AgentEvent::Done => {
@@ -446,7 +509,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent};
 
     fn app() -> App {
-        App::new("dummy", ".".to_string(), "sys".to_string(), &[])
+        App::new("dummy", ".".to_string(), "sys".to_string(), None, &[])
     }
 
     fn mouse(kind: MouseEventKind) -> Event {
