@@ -12,7 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const MAX_INPUT_ROWS: u16 = 8;
 
@@ -314,11 +314,23 @@ impl InputLayoutCache {
     }
 }
 
-/// Rows the live subagent panel occupies (0 when no subagents are running, capped).
-const SUBAGENT_PANEL_MAX: usize = 6;
+/// Agents shown in the tray at once; more collapse into an "… and N more" line.
+const SUBAGENT_TRAY_MAX: usize = 6;
+/// How long a row's status stays "lit" after a progress event before fading to muted.
+const ACTIVITY_FLASH: Duration = Duration::from_millis(600);
 
+/// Tray height: one row per agent (capped), plus a batch header when more than one agent runs.
 fn subagent_panel_rows(count: usize) -> u16 {
-    count.min(SUBAGENT_PANEL_MAX) as u16
+    if count == 0 {
+        return 0;
+    }
+    let header = usize::from(count > 1);
+    let rows = if count > SUBAGENT_TRAY_MAX {
+        SUBAGENT_TRAY_MAX // cap-1 agents + the "… and N more" line
+    } else {
+        count
+    };
+    (header + rows) as u16
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -332,33 +344,115 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
-/// One row per running subagent: `⠋ [id] desc · status · 12s`. Overflow past the cap collapses to a
-/// final "… and N more" line.
+/// Per-agent elapsed: seconds-precise so it visibly ticks (`47s`, `1m04`, `12m30`).
+fn fmt_mmss(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}", secs / 60, secs % 60)
+    }
+}
+
+/// The live agent tray. One row per subagent:
+///
+/// ` ⠸ Port the editor tests to the new module — bash(cargo test)      ·7 1m04`
+///
+/// The full title always wins the width fight — the live status truncates into whatever is left and
+/// drops entirely before the title ever would. The right block is the agent's tool-call count and
+/// its own elapsed clock. Spinners are phase-shifted per agent so parallel work visibly churns out
+/// of sync, a row's status flashes bright for a beat whenever its agent does something, and finished
+/// agents stay pinned with a ✓/✗ until the whole batch lands.
 fn subagent_panel(app: &App, now: Instant, width: u16) -> Vec<Line<'static>> {
     let total = app.subagents.len();
-    let overflow = total > SUBAGENT_PANEL_MAX;
-    let show = if overflow {
-        SUBAGENT_PANEL_MAX - 1
-    } else {
-        total
-    };
-    let spin = theme::SPINNER[app.spinner % theme::SPINNER.len()];
     let mut lines = Vec::new();
+    if total == 0 {
+        return lines;
+    }
+
+    // Batch header (multi-agent only): `↳ agents ▰▰▱ 2/3 · 24s`.
+    if total > 1 {
+        let done = app.subagents.values().filter(|r| r.done.is_some()).count();
+        let batch_start = app
+            .subagents
+            .values()
+            .map(|r| r.started)
+            .min()
+            .unwrap_or(now);
+        let mut spans = vec![Span::styled(" ↳ agents ", theme::dim())];
+        for row in app.subagents.values() {
+            spans.push(match row.done {
+                Some(true) => Span::styled("▰", theme::ok()),
+                Some(false) => Span::styled("▰", theme::err()),
+                None => Span::styled("▱", theme::dim()),
+            });
+        }
+        spans.push(Span::styled(
+            format!(
+                " {done}/{total} · {}",
+                fmt_mmss(now.saturating_duration_since(batch_start).as_secs())
+            ),
+            theme::dim(),
+        ));
+        lines.push(Line::from(spans));
+    }
+
+    let overflow = total > SUBAGENT_TRAY_MAX;
+    let show = if overflow { SUBAGENT_TRAY_MAX - 1 } else { total };
     for (id, row) in app.subagents.iter().take(show) {
-        let elapsed = now.saturating_duration_since(row.started).as_secs();
-        let head = format!(" {spin} [{id}] ");
-        let tail = format!(" · {elapsed}s");
-        let budget = (width as usize).saturating_sub(head.chars().count() + tail.chars().count());
-        let desc = clip(&row.desc, budget / 2);
-        let status_room = budget.saturating_sub(desc.chars().count() + 3); // " · "
-        let status = clip(&row.status, status_room);
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {spin} "), theme::accent()),
-            Span::styled(format!("[{id}] "), theme::muted()),
-            Span::raw(desc),
-            Span::styled(format!(" · {status}"), theme::muted()),
-            Span::styled(tail, theme::dim()),
-        ]));
+        // Right block: `·{steps} {elapsed}` — frozen once the agent finishes.
+        let elapsed = match row.final_ms {
+            Some(ms) => fmt_mmss(ms / 1000),
+            None => fmt_mmss(now.saturating_duration_since(row.started).as_secs()),
+        };
+        let meta = format!("·{} {elapsed}", row.steps);
+
+        // Left glyph: staggered spinner while running (bold during the activity flash), ✓/✗ done.
+        let flashing = row.done.is_none()
+            && now.saturating_duration_since(row.last_activity) < ACTIVITY_FLASH;
+        let glyph = match row.done {
+            Some(true) => Span::styled(" ✓ ", theme::ok()),
+            Some(false) => Span::styled(" ✗ ", theme::err()),
+            None => {
+                let frame = theme::SPINNER[(app.spinner + id * 3) % theme::SPINNER.len()];
+                let style = if flashing {
+                    theme::accent_bold()
+                } else {
+                    theme::accent()
+                };
+                Span::styled(format!(" {frame} "), style)
+            }
+        };
+
+        // Width budget: glyph (3) + title first, then ` — status`, then the right-aligned meta.
+        let budget = (width as usize).saturating_sub(3 + meta.chars().count() + 1);
+        let title = clip(&row.desc, budget);
+        let title_style = if row.done.is_some() {
+            theme::muted()
+        } else {
+            Style::default()
+        };
+        let mut spans = vec![glyph, Span::styled(title.clone(), title_style)];
+
+        let mut used = title.chars().count();
+        let status_room = budget.saturating_sub(used + 3); // " — "
+        if status_room >= 4 && !row.status.trim().is_empty() {
+            let status = clip(&row.status, status_room);
+            used += 3 + status.chars().count();
+            let status_style = if row.done.is_some() {
+                theme::dim()
+            } else if flashing {
+                Style::default() // lit while the agent is actively doing something
+            } else {
+                theme::muted()
+            };
+            spans.push(Span::styled(" — ", theme::dim()));
+            spans.push(Span::styled(status, status_style));
+        }
+
+        let pad = (width as usize).saturating_sub(3 + used + meta.chars().count());
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(meta, theme::dim()));
+        lines.push(Line::from(spans));
     }
     if overflow {
         lines.push(Line::from(Span::styled(
@@ -762,6 +856,91 @@ mod tests {
         assert_eq!(clip("short", 10), "short");
         assert_eq!(clip("truncate me", 5), "trun…");
         assert_eq!(clip("x", 0), "");
+    }
+
+    fn tray_app(rows: &[(&str, &str, Option<bool>)]) -> super::super::app::App {
+        use super::super::app::{App, UiMsg};
+        use crate::events::AgentEvent;
+        let mut app = App::new("m", ".".to_string(), "sys".to_string(), None, &[]);
+        for (i, (desc, status, done)) in rows.iter().enumerate() {
+            app.on_ui(UiMsg::Agent(AgentEvent::SubagentStart {
+                id: i,
+                desc: desc.to_string(),
+            }));
+            app.on_ui(UiMsg::Agent(AgentEvent::SubagentProgress {
+                id: i,
+                status: status.to_string(),
+            }));
+            if let Some(ok) = done {
+                app.on_ui(UiMsg::Agent(AgentEvent::SubagentEnd {
+                    id: i,
+                    ok: *ok,
+                    summary: format!("result {i}"),
+                    elapsed_ms: 1500,
+                }));
+            }
+        }
+        app
+    }
+
+    fn tray_text(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(row_text).collect()
+    }
+
+    #[test]
+    fn tray_gives_the_title_full_width_before_the_status() {
+        let long_title = "Port the editor tests over to the brand new tui module layout";
+        let app = tray_app(&[(long_title, "bash(cargo test)", None)]);
+        let now = Instant::now();
+
+        // Plenty of width: full title AND status visible.
+        let wide = tray_text(&subagent_panel(&app, now, 110));
+        assert!(wide[0].contains(long_title), "full title must render: {wide:?}");
+        assert!(wide[0].contains("bash(cargo test)"));
+
+        // Tight width: the title survives untruncated; the status is what gives way.
+        let narrow = tray_text(&subagent_panel(&app, now, (3 + long_title.len() + 8) as u16));
+        assert!(
+            narrow[0].contains(long_title),
+            "title must win the width fight: {narrow:?}"
+        );
+        assert!(!narrow[0].contains("bash(cargo test)"));
+    }
+
+    #[test]
+    fn tray_header_tracks_batch_progress_and_rows_pin_when_done() {
+        let app = tray_app(&[
+            ("first task", "working", Some(true)),
+            ("second task", "working", None),
+            ("third task", "working", Some(false)),
+        ]);
+        let lines = subagent_panel(&app, Instant::now(), 100);
+        let text = tray_text(&lines);
+
+        // Header: progress blocks + counts (2 of 3 done).
+        assert!(text[0].contains("agents"));
+        assert!(text[0].contains("2/3"), "header: {text:?}");
+        assert_eq!(text[0].matches('▰').count(), 2);
+        assert_eq!(text[0].matches('▱').count(), 1);
+
+        // Finished rows stay pinned with their outcome glyph and step counter.
+        assert!(text[1].contains('✓') && text[1].contains("first task"));
+        assert!(text[3].contains('✗') && text[3].contains("third task"));
+        assert!(text[1].contains("·1"), "step counter shown: {text:?}");
+        // The running row spins (some braille frame), not a check.
+        assert!(!text[2].contains('✓') && !text[2].contains('✗'));
+
+        // Height accounts for the header row.
+        assert_eq!(subagent_panel_rows(3), 4);
+        assert_eq!(subagent_panel_rows(1), 1); // no header for a single agent
+        assert_eq!(subagent_panel_rows(0), 0);
+    }
+
+    #[test]
+    fn fmt_mmss_ticks_seconds() {
+        assert_eq!(fmt_mmss(47), "47s");
+        assert_eq!(fmt_mmss(64), "1m04");
+        assert_eq!(fmt_mmss(750), "12m30");
     }
 
     #[test]

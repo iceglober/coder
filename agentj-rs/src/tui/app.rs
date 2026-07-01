@@ -67,11 +67,21 @@ pub struct TurnHandle {
     pub job_watermark: u64,
 }
 
-/// One live subagent's row in the panel shown while a delegate batch runs.
+/// One subagent's row in the tray shown while a delegate batch runs. Finished rows stay in the tray
+/// (with their outcome) until the whole batch completes, so checkmarks visibly accumulate.
 pub struct SubagentRow {
     pub desc: String,
+    /// Latest progress line; after completion, the final result summary.
     pub status: String,
     pub started: Instant,
+    /// Progress events seen — the per-agent activity counter.
+    pub steps: u64,
+    /// When the last progress event arrived (drives the brief activity flash).
+    pub last_activity: Instant,
+    /// `Some(ok)` once the subagent finished.
+    pub done: Option<bool>,
+    /// Elapsed frozen at completion.
+    pub final_ms: Option<u64>,
 }
 
 /// Work the event loop must perform after a state transition (it needs `.await` or the turn task's
@@ -178,6 +188,32 @@ impl App {
 
     pub fn effect_active(&self) -> bool {
         self.effect_until.is_some_and(|until| until > Instant::now())
+    }
+
+    /// Collapse the agent tray: every finished subagent gets a permanent ✓/✗ summary line in the
+    /// transcript (still-running rows just vanish — their turn was aborted). Called when a delegate
+    /// batch completes, and on turn end/abort as a safety net.
+    fn flush_subagent_summaries(&mut self) {
+        for (id, row) in std::mem::take(&mut self.subagents) {
+            let Some(ok) = row.done else { continue };
+            let (glyph, style) = if ok {
+                ("✓", theme::ok())
+            } else {
+                ("✗", theme::err())
+            };
+            let mut spans = vec![
+                Span::styled(format!("{glyph} "), style),
+                Span::styled(format!("[{id}] {}", row.desc), theme::muted()),
+            ];
+            if let Some(ms) = row.final_ms {
+                spans.push(Span::styled(format!(" — {}", fmt_ms(ms as u128)), theme::dim()));
+            }
+            if !row.status.trim().is_empty() {
+                spans.push(Span::styled(format!(" · {}", row.status), theme::dim()));
+            }
+            self.transcript.push(Line::from(spans));
+        }
+        self.dirty = true;
     }
 
     /// Push a user prompt line, preceded by a blank line to separate turns visually.
@@ -388,7 +424,7 @@ impl App {
     fn abort_turn(&mut self) -> AppEffect {
         self.running = false;
         self.status.clear();
-        self.subagents.clear();
+        self.flush_subagent_summaries();
         self.transcript.push(dim_line("[interrupted]"));
         self.follow = true;
         self.set_effect("interrupted");
@@ -506,7 +542,7 @@ impl App {
                 self.running = false;
                 self.status.clear();
                 self.turn = None;
-                self.subagents.clear();
+                self.flush_subagent_summaries();
                 if self.effect_label.is_empty() {
                     self.effect_until = Some(Instant::now() + EFFECT_TTL);
                     self.effect_label = "all set".to_string();
@@ -537,8 +573,12 @@ impl App {
                 elapsed_ms,
                 ..
             } => {
-                // The delegate summary is redundant with the per-subagent ✓/✗ lines already shown.
+                // A finished delegate collapses the agent tray into permanent transcript summaries;
+                // its own summary is redundant with those per-agent ✓/✗ lines.
                 let is_delegate = self.current_tool.starts_with("delegate(");
+                if is_delegate {
+                    self.flush_subagent_summaries();
+                }
                 let shown = if is_delegate { "" } else { summary.as_str() };
                 self.transcript
                     .push(tool_end_line(&self.current_tool, ok, elapsed_ms, shown));
@@ -546,12 +586,17 @@ impl App {
                 self.set_effect(format!("done in {}", fmt_ms(elapsed_ms)));
             }
             AgentEvent::SubagentStart { id, desc } => {
+                let now = Instant::now();
                 self.subagents.insert(
                     id,
                     SubagentRow {
                         desc,
                         status: "starting".to_string(),
-                        started: Instant::now(),
+                        started: now,
+                        steps: 0,
+                        last_activity: now,
+                        done: None,
+                        final_ms: None,
                     },
                 );
                 self.dirty = true;
@@ -559,6 +604,8 @@ impl App {
             AgentEvent::SubagentProgress { id, status } => {
                 if let Some(row) = self.subagents.get_mut(&id) {
                     row.status = status;
+                    row.steps += 1;
+                    row.last_activity = Instant::now();
                 }
                 self.dirty = true;
             }
@@ -568,21 +615,15 @@ impl App {
                 summary,
                 elapsed_ms,
             } => {
-                let desc = self.subagents.remove(&id).map(|r| r.desc).unwrap_or_default();
-                let (glyph, style) = if ok {
-                    ("✓", theme::ok())
-                } else {
-                    ("✗", theme::err())
-                };
-                let mut spans = vec![
-                    Span::styled(format!("{glyph} "), style),
-                    Span::styled(format!("[{id}] {desc}"), theme::muted()),
-                    Span::styled(format!(" — {}", fmt_ms(elapsed_ms as u128)), theme::dim()),
-                ];
-                if !summary.trim().is_empty() {
-                    spans.push(Span::styled(format!(" · {summary}"), theme::dim()));
+                // Keep the row in the tray with its outcome; the transcript summary lands when the
+                // whole batch collapses (flush_subagent_summaries).
+                if let Some(row) = self.subagents.get_mut(&id) {
+                    row.done = Some(ok);
+                    row.final_ms = Some(elapsed_ms);
+                    if !summary.trim().is_empty() {
+                        row.status = summary;
+                    }
                 }
-                self.transcript.push(Line::from(spans));
                 self.dirty = true;
             }
             AgentEvent::Usage(u) => {
@@ -774,6 +815,61 @@ mod tests {
         b.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(b.scroll, before, "multi-line input: ↑ moves the cursor, not the scroll");
         assert!(b.editor.cursor < b.editor.text().len());
+    }
+
+    fn transcript_text(a: &App) -> String {
+        a.transcript
+            .text()
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn tray_collapses_into_transcript_summaries_when_the_delegate_batch_lands() {
+        use crate::events::AgentEvent;
+        let mut a = app();
+        a.on_ui(UiMsg::Agent(AgentEvent::ToolStart {
+            name: "delegate".to_string(),
+            args: "{tasks:…}".to_string(),
+        }));
+        a.on_ui(UiMsg::Agent(AgentEvent::SubagentStart {
+            id: 0,
+            desc: "port the tests".to_string(),
+        }));
+        a.on_ui(UiMsg::Agent(AgentEvent::SubagentProgress {
+            id: 0,
+            status: "bash(cargo test)".to_string(),
+        }));
+        assert_eq!(a.subagents[&0].steps, 1);
+
+        a.on_ui(UiMsg::Agent(AgentEvent::SubagentEnd {
+            id: 0,
+            ok: true,
+            summary: "all 4 tests pass".to_string(),
+            elapsed_ms: 2000,
+        }));
+        // Finished but batch still open: row pinned in the tray, no transcript summary yet.
+        assert_eq!(a.subagents[&0].done, Some(true));
+        assert!(!transcript_text(&a).contains("all 4 tests pass"));
+
+        a.on_ui(UiMsg::Agent(AgentEvent::ToolEnd {
+            ok: true,
+            elapsed_ms: 2100,
+            summary: "[subagent 0] …".to_string(),
+        }));
+        // Batch landed: tray empty, permanent ✓ summary in the transcript.
+        assert!(a.subagents.is_empty());
+        let t = transcript_text(&a);
+        assert!(t.contains("✓ [0] port the tests"), "transcript: {t}");
+        assert!(t.contains("all 4 tests pass"));
     }
 
     #[test]

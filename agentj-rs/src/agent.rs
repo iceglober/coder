@@ -78,7 +78,8 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
         let sem = sem.clone();
         let handle = set.spawn(async move {
             let _permit = sem.acquire_owned().await;
-            let desc = first_line(&task, 80);
+            // Generous cap: the tray gives the title the full row width, so keep it intact.
+            let desc = first_line(&task, 160);
             let _ = parent.send(AgentEvent::SubagentStart { id: i, desc });
             let started = Instant::now();
             let prompt = match context {
