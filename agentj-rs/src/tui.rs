@@ -791,12 +791,38 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::MouseEventKind;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
     fn ed(s: &str) -> Editor {
         let mut e = Editor::default();
         e.insert_str(s);
         e
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    fn apply_key(editor: &mut Editor, key_event: KeyEvent, running: bool) -> Action {
+        let action = key_to_action(key_event, running, editor.text());
+        match action {
+            Action::ClearInput => editor.clear(),
+            Action::Char(c) => editor.insert_char(c),
+            Action::Backspace => editor.backspace(),
+            Action::Delete => editor.delete(),
+            Action::DeleteToBufferHome => editor.delete_to_buffer_home(),
+            Action::Newline => editor.insert_char('\n'),
+            Action::Left => editor.left(),
+            Action::Right => editor.right(),
+            Action::WordLeft => editor.word_left(),
+            Action::WordRight => editor.word_right(),
+            Action::Up => editor.up(),
+            Action::Down => editor.down(),
+            Action::Home => editor.home(),
+            Action::End => editor.end(),
+            Action::Submit(_) | Action::None | Action::Quit | Action::Complete | Action::AbortTurn | Action::CtrlC | Action::ScrollUp | Action::ScrollDown | Action::PageUp | Action::PageDown => {}
+        }
+        action
     }
 
     #[test]
@@ -899,43 +925,26 @@ mod tests {
 
     #[test]
     fn enter_submits_while_chords_insert_newlines() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let plain = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let plain = |c| key(c, KeyModifiers::NONE);
         // Plain Enter submits (the whole bug).
         assert!(
             matches!(key_to_action(plain(KeyCode::Enter), false, "hi"), Action::Submit(s) if s == "hi")
         );
         // Shift+Enter and Ctrl-J insert a newline, but shifted printable chars still type normally.
         assert!(matches!(
-            key_to_action(
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
-                false,
-                "hi"
-            ),
+            key_to_action(key(KeyCode::Enter, KeyModifiers::SHIFT), false, "hi"),
             Action::Newline
         ));
         assert!(matches!(
-            key_to_action(
-                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-                false,
-                "hi"
-            ),
+            key_to_action(key(KeyCode::Char('j'), KeyModifiers::CONTROL), false, "hi"),
             Action::Newline
         ));
         assert!(matches!(
-            key_to_action(
-                KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
-                false,
-                "hi"
-            ),
+            key_to_action(key(KeyCode::Char('A'), KeyModifiers::SHIFT), false, "hi"),
             Action::Char('A')
         ));
         assert!(matches!(
-            key_to_action(
-                KeyEvent::new(KeyCode::Char(':'), KeyModifiers::SHIFT),
-                false,
-                "hi"
-            ),
+            key_to_action(key(KeyCode::Char(':'), KeyModifiers::SHIFT), false, "hi"),
             Action::Char(':')
         ));
         // Arrows move the cursor; Alt+arrows jump by word; Cmd/Super+arrows jump to line edges.
@@ -948,31 +957,19 @@ mod tests {
             Action::Up
         ));
         assert!(matches!(
-            key_to_action(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT), false, "hi"),
+            key_to_action(key(KeyCode::Left, KeyModifiers::ALT), false, "hi"),
             Action::WordLeft
         ));
         assert!(matches!(
-            key_to_action(
-                KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
-                false,
-                "hi"
-            ),
+            key_to_action(key(KeyCode::Right, KeyModifiers::ALT), false, "hi"),
             Action::WordRight
         ));
         assert!(matches!(
-            key_to_action(
-                KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER),
-                false,
-                "hi"
-            ),
+            key_to_action(key(KeyCode::Left, KeyModifiers::SUPER), false, "hi"),
             Action::Home
         ));
         assert!(matches!(
-            key_to_action(
-                KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER),
-                false,
-                "hi"
-            ),
+            key_to_action(key(KeyCode::Right, KeyModifiers::SUPER), false, "hi"),
             Action::End
         ));
         // Typing is ignored mid-turn, but Esc interrupts, Ctrl-C signals quit, and Ctrl+↑ scrolls.
@@ -989,16 +986,187 @@ mod tests {
             Action::ClearInput
         ));
         assert!(matches!(
-            key_to_action(
-                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                true,
-                ""
-            ),
+            key_to_action(key(KeyCode::Char('c'), KeyModifiers::CONTROL), true, ""),
             Action::CtrlC
         ));
         assert!(matches!(
-            key_to_action(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), true, ""),
+            key_to_action(key(KeyCode::Up, KeyModifiers::CONTROL), true, ""),
             Action::ScrollUp
         ));
+    }
+
+    #[test]
+    fn key_to_action_mapping_matrix_covers_nontrivial_branches() {
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('d'), KeyModifiers::CONTROL), false, "hi"),
+            Action::Quit
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::PageUp, KeyModifiers::NONE), false, "hi"),
+            Action::PageUp
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::PageDown, KeyModifiers::NONE), false, "hi"),
+            Action::PageDown
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Down, KeyModifiers::CONTROL), false, "hi"),
+            Action::ScrollDown
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Tab, KeyModifiers::NONE), false, "hi"),
+            Action::Complete
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Backspace, KeyModifiers::SUPER), false, "hi"),
+            Action::DeleteToBufferHome
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Backspace, KeyModifiers::NONE), false, "hi"),
+            Action::Backspace
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Delete, KeyModifiers::NONE), false, "hi"),
+            Action::Delete
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Home, KeyModifiers::NONE), false, "hi"),
+            Action::Home
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::End, KeyModifiers::NONE), false, "hi"),
+            Action::End
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('b'), KeyModifiers::ALT), false, "hi"),
+            Action::WordLeft
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('B'), KeyModifiers::ALT), false, "hi"),
+            Action::WordLeft
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('f'), KeyModifiers::ALT), false, "hi"),
+            Action::WordRight
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('F'), KeyModifiers::ALT), false, "hi"),
+            Action::WordRight
+        ));
+    }
+
+    #[test]
+    fn running_turn_allows_only_interrupt_quit_scroll_and_alt_word_aliases() {
+        assert!(matches!(
+            key_to_action(key(KeyCode::Esc, KeyModifiers::NONE), true, "hi"),
+            Action::AbortTurn
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('c'), KeyModifiers::CONTROL), true, "hi"),
+            Action::CtrlC
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('d'), KeyModifiers::CONTROL), true, "hi"),
+            Action::Quit
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::PageUp, KeyModifiers::NONE), true, "hi"),
+            Action::PageUp
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::PageDown, KeyModifiers::NONE), true, "hi"),
+            Action::PageDown
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Up, KeyModifiers::CONTROL), true, "hi"),
+            Action::ScrollUp
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Down, KeyModifiers::CONTROL), true, "hi"),
+            Action::ScrollDown
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('b'), KeyModifiers::ALT), true, "hi"),
+            Action::WordLeft
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('f'), KeyModifiers::ALT), true, "hi"),
+            Action::WordRight
+        ));
+
+        assert!(matches!(
+            key_to_action(key(KeyCode::Enter, KeyModifiers::NONE), true, "hi"),
+            Action::None
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Tab, KeyModifiers::NONE), true, "hi"),
+            Action::None
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Left, KeyModifiers::NONE), true, "hi"),
+            Action::None
+        ));
+        assert!(matches!(
+            key_to_action(key(KeyCode::Char('x'), KeyModifiers::NONE), true, "hi"),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn keystroke_sequence_distinguishes_submit_from_multiline_newline_chords() {
+        let mut e = Editor::default();
+        apply_key(&mut e, key(KeyCode::Char('a'), KeyModifiers::NONE), false);
+        apply_key(&mut e, key(KeyCode::Enter, KeyModifiers::SHIFT), false);
+        apply_key(&mut e, key(KeyCode::Char('b'), KeyModifiers::NONE), false);
+        assert_eq!(e.text(), "a\nb");
+
+        let submitted = apply_key(&mut e, key(KeyCode::Enter, KeyModifiers::NONE), false);
+        assert!(matches!(submitted, Action::Submit(s) if s == "a\nb"));
+
+        let mut ctrl_j = Editor::default();
+        apply_key(&mut ctrl_j, key(KeyCode::Char('x'), KeyModifiers::NONE), false);
+        apply_key(&mut ctrl_j, key(KeyCode::Char('j'), KeyModifiers::CONTROL), false);
+        apply_key(&mut ctrl_j, key(KeyCode::Char('y'), KeyModifiers::NONE), false);
+        assert_eq!(ctrl_j.text(), "x\ny");
+
+        let mut alt_enter = Editor::default();
+        apply_key(&mut alt_enter, key(KeyCode::Char('m'), KeyModifiers::NONE), false);
+        apply_key(&mut alt_enter, key(KeyCode::Enter, KeyModifiers::ALT), false);
+        apply_key(&mut alt_enter, key(KeyCode::Char('n'), KeyModifiers::NONE), false);
+        assert_eq!(alt_enter.text(), "m\nn");
+
+        let mut ctrl_enter = Editor::default();
+        apply_key(&mut ctrl_enter, key(KeyCode::Char('p'), KeyModifiers::NONE), false);
+        apply_key(&mut ctrl_enter, key(KeyCode::Enter, KeyModifiers::CONTROL), false);
+        apply_key(&mut ctrl_enter, key(KeyCode::Char('q'), KeyModifiers::NONE), false);
+        assert_eq!(ctrl_enter.text(), "p\nq");
+    }
+
+    #[test]
+    fn alt_word_aliases_match_alt_arrow_word_motion() {
+        let mut e = ed("one two three");
+        apply_key(&mut e, key(KeyCode::Char('b'), KeyModifiers::ALT), false);
+        assert_eq!(e.cursor, "one two ".len());
+        apply_key(&mut e, key(KeyCode::Left, KeyModifiers::ALT), false);
+        assert_eq!(e.cursor, "one ".len());
+        apply_key(&mut e, key(KeyCode::Char('f'), KeyModifiers::ALT), false);
+        assert_eq!(e.cursor, "one two".len());
+    }
+
+    #[test]
+    fn destructive_editing_shortcuts_apply_through_actions() {
+        let mut e = ed("abc def");
+        apply_key(&mut e, key(KeyCode::Left, KeyModifiers::NONE), false);
+        apply_key(&mut e, key(KeyCode::Backspace, KeyModifiers::SUPER), false);
+        assert_eq!(e.text(), "f");
+        assert_eq!(e.cursor, 0);
+
+        let mut e = ed("abcd");
+        apply_key(&mut e, key(KeyCode::Left, KeyModifiers::NONE), false);
+        apply_key(&mut e, key(KeyCode::Left, KeyModifiers::NONE), false);
+        apply_key(&mut e, key(KeyCode::Backspace, KeyModifiers::NONE), false);
+        assert_eq!(e.text(), "acd");
+        apply_key(&mut e, key(KeyCode::Delete, KeyModifiers::NONE), false);
+        assert_eq!(e.text(), "ad");
     }
 }
