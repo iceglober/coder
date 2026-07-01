@@ -336,14 +336,59 @@ impl Default for InputLayoutCache {
 
 impl InputLayoutCache {
     fn refresh(&mut self, editor: &Editor, width: u16) {
+        self.refresh_with_metrics(editor, width, None);
+    }
+
+    fn refresh_with_metrics(
+        &mut self,
+        editor: &Editor,
+        width: u16,
+        #[cfg(test)] metrics: Option<&mut PerfMetrics>,
+        #[cfg(not(test))] _metrics: Option<&mut ()>,
+    ) {
         if self.revision == editor.revision() && self.width == width {
+            #[cfg(test)]
+            if let Some(metrics) = metrics {
+                metrics.input_layout_cache_hits += 1;
+            }
             return;
+        }
+        #[cfg(test)]
+        if let Some(metrics) = metrics {
+            metrics.input_layout_refreshes += 1;
         }
         self.revision = editor.revision();
         self.width = width;
         self.rows = input_rows(editor.text(), width);
         self.rendered = input_lines(editor.text());
         self.cursor = visual_cursor(editor.text(), editor.cursor, width);
+    }
+}
+
+#[cfg(test)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct PerfMetrics {
+    draw_calls: u64,
+    input_batches: u64,
+    input_events_total: u64,
+    input_batch_max: usize,
+    ui_batches: u64,
+    ui_events_total: u64,
+    ui_batch_max: usize,
+    input_layout_refreshes: u64,
+    input_layout_cache_hits: u64,
+}
+
+#[cfg(test)]
+fn note_batch(metrics: &mut PerfMetrics, len: usize, input: bool) {
+    if input {
+        metrics.input_batches += 1;
+        metrics.input_events_total += len as u64;
+        metrics.input_batch_max = metrics.input_batch_max.max(len);
+    } else {
+        metrics.ui_batches += 1;
+        metrics.ui_events_total += len as u64;
+        metrics.ui_batch_max = metrics.ui_batch_max.max(len);
     }
 }
 
@@ -706,6 +751,10 @@ pub async fn run(
     while !quit {
         if dirty {
             input_cache.refresh(&editor, terminal.size()?.width);
+            #[cfg(test)]
+            {
+                let _ = &input_cache;
+            }
             terminal.draw(|f| {
             let area = f.area();
             let in_h = input_cache.rows;
@@ -811,6 +860,10 @@ pub async fn run(
                 let mut pending = vec![ev];
                 while let Ok(ev) = in_rx.try_recv() {
                     pending.push(ev);
+                }
+                #[cfg(test)]
+                {
+                    let _ = pending.len();
                 }
                 for ev in pending {
                     match ev {
@@ -961,6 +1014,10 @@ pub async fn run(
                 let mut pending = vec![msg];
                 while let Ok(msg) = ui_rx.try_recv() {
                     pending.push(msg);
+                }
+                #[cfg(test)]
+                {
+                    let _ = pending.len();
                 }
                 for msg in pending {
                     match msg {
@@ -1288,6 +1345,64 @@ mod tests {
         }
         assert_eq!(scroll, 5);
         assert_eq!(follow, before);
+    }
+
+    #[test]
+    fn input_layout_cache_skips_unchanged_refreshes() {
+        let mut cache = InputLayoutCache::default();
+        let mut metrics = PerfMetrics::default();
+        let mut editor = ed("/task 123");
+
+        cache.refresh_with_metrics(&editor, 40, Some(&mut metrics));
+        cache.refresh_with_metrics(&editor, 40, Some(&mut metrics));
+        editor.insert_char('x');
+        cache.refresh_with_metrics(&editor, 40, Some(&mut metrics));
+        cache.refresh_with_metrics(&editor, 20, Some(&mut metrics));
+
+        assert_eq!(metrics.input_layout_refreshes, 3);
+        assert_eq!(metrics.input_layout_cache_hits, 1);
+    }
+
+    #[test]
+    fn perf_metrics_track_batched_event_drains() {
+        let mut metrics = PerfMetrics::default();
+        note_batch(&mut metrics, 5, true);
+        note_batch(&mut metrics, 3, true);
+        note_batch(&mut metrics, 4, false);
+
+        assert_eq!(metrics.input_batches, 2);
+        assert_eq!(metrics.input_events_total, 8);
+        assert_eq!(metrics.input_batch_max, 5);
+        assert_eq!(metrics.ui_batches, 1);
+        assert_eq!(metrics.ui_events_total, 4);
+        assert_eq!(metrics.ui_batch_max, 4);
+    }
+
+    #[test]
+    fn long_edit_script_preserves_expected_text_and_cursor() {
+        let mut e = Editor::default();
+        for _ in 0..64 {
+            apply_key(&mut e, key(KeyCode::Char('a'), KeyModifiers::NONE), false);
+        }
+        for _ in 0..16 {
+            apply_key(&mut e, key(KeyCode::Left, KeyModifiers::NONE), false);
+        }
+        for _ in 0..8 {
+            apply_key(&mut e, key(KeyCode::Backspace, KeyModifiers::NONE), false);
+        }
+        apply_key(&mut e, key(KeyCode::Enter, KeyModifiers::SHIFT), false);
+        for _ in 0..32 {
+            apply_key(&mut e, key(KeyCode::Char('b'), KeyModifiers::NONE), false);
+        }
+        for _ in 0..10 {
+            apply_key(&mut e, key(KeyCode::Char('f'), KeyModifiers::ALT), false);
+            apply_key(&mut e, key(KeyCode::Char('b'), KeyModifiers::ALT), false);
+        }
+        apply_key(&mut e, key(KeyCode::Left, KeyModifiers::SUPER), false);
+        apply_key(&mut e, key(KeyCode::Delete, KeyModifiers::SUPER), false);
+
+        assert_eq!(e.text(), format!("{}\n", "a".repeat(40)));
+        assert_eq!(e.cursor, "a".repeat(40).len() + 1);
     }
 
     #[test]

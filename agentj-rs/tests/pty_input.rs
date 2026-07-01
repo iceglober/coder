@@ -172,3 +172,32 @@ fn ctrl_backspace_byte_deletes_a_word_through_pty() {
         "expected PTY ctrl-backspace byte not to leave the full original input intact, got:\n{output}"
     );
 }
+
+#[test]
+fn long_burst_input_survives_pty_round_trip() {
+    let payload = "a".repeat(512);
+    let mut input = payload.clone().into_bytes();
+    input.push(b'\r');
+    let output = run_once_with_input(&input);
+    assert!(
+        output.contains(&payload[..128]),
+        "expected long PTY burst input prefix in output, got:\n{output}"
+    );
+    assert!(
+        output.contains(&payload[payload.len() - 128..]),
+        "expected long PTY burst input suffix in output, got:\n{output}"
+    );
+}
+
+#[test]
+fn repeated_word_deletes_apply_before_submit_through_pty() {
+    let output = run_once_with_input(b"alpha beta gamma\x17\x17\r");
+    assert!(
+        output.contains("gamma") || output.contains("beta") || output.contains("alpha"),
+        "expected repeated PTY delete bytes to produce visible edited terminal output, got:\n{output}"
+    );
+    assert!(
+        !output.contains("alphabeta gamma"),
+        "expected repeated PTY delete bytes not to leave an undeleted merged prompt intact, got:\n{output}"
+    );
+}
