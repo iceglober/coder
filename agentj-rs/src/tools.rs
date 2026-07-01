@@ -13,6 +13,29 @@ use std::time::Duration;
 
 const BASH_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// A tool result. `text` is what the model sees (tools never error out of a call, per convention);
+/// `ok` is a structural success flag the UI uses to mark failed calls, decided at the source instead
+/// of re-sniffed from the string.
+pub struct ToolOutcome {
+    pub text: String,
+    pub ok: bool,
+}
+
+impl ToolOutcome {
+    fn ok(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ok: true,
+        }
+    }
+    fn err(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ok: false,
+        }
+    }
+}
+
 pub struct Tools {
     pub root: PathBuf,
     pub jobs: Arc<JobManager>,
@@ -83,7 +106,7 @@ impl Tools {
         self.root.to_string_lossy().into_owned()
     }
 
-    pub async fn call(&self, name: &str, args: &Value) -> String {
+    pub async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
         match name {
             "read_file" => self.read_file(args),
             "write_file" => self.write_file(args),
@@ -93,58 +116,63 @@ impl Tools {
             "grep" => self.grep(args).await,
             "bash" => self.bash(args).await,
             "job_start" => self.job_start(args).await,
-            "job_check" => {
+            "job_check" => ToolOutcome::ok(
                 self.jobs
                     .check(args.get("id").and_then(|v| v.as_u64()))
-                    .await
-            }
+                    .await,
+            ),
             "job_stop" => match args.get("id").and_then(|v| v.as_u64()) {
-                Some(id) => self.jobs.stop(id).await,
-                None => "error: job_stop needs an id".to_string(),
+                Some(id) => ToolOutcome::ok(self.jobs.stop(id).await),
+                None => ToolOutcome::err("error: job_stop needs an id"),
             },
             other => match &self.mcp {
-                Some(mcp) if mcp.has_tool(other) => mcp.call(other, args).await,
-                _ => format!("error: unknown tool `{other}`"),
+                Some(mcp) if mcp.has_tool(other) => {
+                    let text = mcp.call(other, args).await;
+                    // rmcp errors are stringified with an "error" prefix in mcp/client.rs.
+                    let ok = !text.trim_start().to_ascii_lowercase().starts_with("error");
+                    ToolOutcome { text, ok }
+                }
+                _ => ToolOutcome::err(format!("error: unknown tool `{other}`")),
             },
         }
     }
 
-    async fn job_start(&self, args: &Value) -> String {
+    async fn job_start(&self, args: &Value) -> ToolOutcome {
         let command = match arg_str(args, "command") {
             Some(c) => c,
-            None => return "error: job_start needs a command".to_string(),
+            None => return ToolOutcome::err("error: job_start needs a command"),
         };
         let timeout = args
             .get("timeout_s")
             .and_then(|v| v.as_u64())
             .map(Duration::from_secs);
         match self.jobs.start(command, timeout).await {
-            Ok(id) => format!(
+            Ok(id) => ToolOutcome::ok(format!(
                 "started job {id} in the background — keep working; you'll be nudged when it finishes{}.",
                 timeout.map(|t| format!(" or after {}s", t.as_secs())).unwrap_or_default()
-            ),
-            Err(e) => format!("error: {e}"),
+            )),
+            Err(e) => ToolOutcome::err(format!("error: {e}")),
         }
     }
 
-    fn read_file(&self, args: &Value) -> String {
+    fn read_file(&self, args: &Value) -> ToolOutcome {
         let path = match arg_str(args, "path") {
             Some(p) => p,
-            None => return "error: read_file needs a path".into(),
+            None => return ToolOutcome::err("error: read_file needs a path"),
         };
         let abs = match safe_resolve(&self.root, path) {
             Ok(a) => a,
-            Err(e) => return format!("error: {e}"),
+            Err(e) => return ToolOutcome::err(format!("error: {e}")),
         };
         let bytes = match fs::read(&abs) {
             Ok(b) => b,
-            Err(_) => return format!("file not found: {path}"),
+            Err(_) => return ToolOutcome::err(format!("file not found: {path}")),
         };
         if bytes.is_empty() {
-            return "(empty file)".into();
+            return ToolOutcome::ok("(empty file)");
         }
         if bytes.iter().take(8000).any(|&b| b == 0) {
-            return format!("[binary file, {} bytes, not shown]", bytes.len());
+            return ToolOutcome::ok(format!("[binary file, {} bytes, not shown]", bytes.len()));
         }
         let text = String::from_utf8_lossy(&bytes);
         let lines: Vec<&str> = text.split('\n').collect();
@@ -160,7 +188,9 @@ impl Tools {
             .unwrap_or(400)
             .clamp(1, 1200) as usize;
         if offset > total {
-            return format!("{path}: {total} lines; offset {offset} is past the end");
+            return ToolOutcome::err(format!(
+                "{path}: {total} lines; offset {offset} is past the end"
+            ));
         }
         let end = (offset - 1 + limit).min(total);
         let numbered: String = lines[offset - 1..end]
@@ -174,68 +204,68 @@ impl Tools {
         } else {
             String::new()
         };
-        format!("{}{}", clip(&numbered, 40_000), note)
+        ToolOutcome::ok(format!("{}{}", clip(&numbered, 40_000), note))
     }
 
-    fn write_file(&self, args: &Value) -> String {
+    fn write_file(&self, args: &Value) -> ToolOutcome {
         let (path, content) = match (arg_str(args, "path"), arg_str(args, "content")) {
             (Some(p), Some(c)) => (p, c),
-            _ => return "error: write_file needs path and content".into(),
+            _ => return ToolOutcome::err("error: write_file needs path and content"),
         };
         let abs = match safe_resolve(&self.root, path) {
             Ok(a) => a,
-            Err(e) => return format!("error: {e}"),
+            Err(e) => return ToolOutcome::err(format!("error: {e}")),
         };
         if let Some(parent) = abs.parent() {
             let _ = fs::create_dir_all(parent);
         }
         match fs::write(&abs, content) {
-            Ok(_) => format!("wrote {} bytes to {path}", content.len()),
-            Err(e) => format!("error: {e}"),
+            Ok(_) => ToolOutcome::ok(format!("wrote {} bytes to {path}", content.len())),
+            Err(e) => ToolOutcome::err(format!("error: {e}")),
         }
     }
 
-    fn edit_file(&self, args: &Value) -> String {
+    fn edit_file(&self, args: &Value) -> ToolOutcome {
         let (path, old, new) = match (
             arg_str(args, "path"),
             arg_str(args, "old_string"),
             arg_str(args, "new_string"),
         ) {
             (Some(p), Some(o), Some(n)) => (p, o, n),
-            _ => return "error: edit_file needs path, old_string, new_string".into(),
+            _ => return ToolOutcome::err("error: edit_file needs path, old_string, new_string"),
         };
         let abs = match safe_resolve(&self.root, path) {
             Ok(a) => a,
-            Err(e) => return format!("error: {e}"),
+            Err(e) => return ToolOutcome::err(format!("error: {e}")),
         };
         let text = match fs::read_to_string(&abs) {
             Ok(t) => t,
-            Err(_) => return format!("file not found: {path}"),
+            Err(_) => return ToolOutcome::err(format!("file not found: {path}")),
         };
         let count = text.matches(old).count();
         if count == 0 {
-            return format!("old_string not found in {path}");
+            return ToolOutcome::err(format!("old_string not found in {path}"));
         }
         if count > 1 {
-            return format!(
+            return ToolOutcome::err(format!(
                 "old_string is not unique in {path} ({count} matches) — add more context"
-            );
+            ));
         }
         match fs::write(&abs, text.replacen(old, new, 1)) {
-            Ok(_) => format!("edited {path}"),
-            Err(e) => format!("error: {e}"),
+            Ok(_) => ToolOutcome::ok(format!("edited {path}")),
+            Err(e) => ToolOutcome::err(format!("error: {e}")),
         }
     }
 
-    fn list_dir(&self, args: &Value) -> String {
+    fn list_dir(&self, args: &Value) -> ToolOutcome {
         let path = arg_str(args, "path").unwrap_or(".");
         let abs = match safe_resolve(&self.root, path) {
             Ok(a) => a,
-            Err(e) => return format!("error: {e}"),
+            Err(e) => return ToolOutcome::err(format!("error: {e}")),
         };
         let entries = match fs::read_dir(&abs) {
             Ok(e) => e,
-            Err(e) => return format!("error: {e}"),
+            Err(e) => return ToolOutcome::err(format!("error: {e}")),
         };
         let mut names: Vec<String> = entries
             .filter_map(|e| e.ok())
@@ -250,19 +280,21 @@ impl Tools {
             .collect();
         names.sort();
         if names.is_empty() {
-            "(empty)".into()
+            ToolOutcome::ok("(empty)")
         } else {
-            clip(&names.join("\n"), 8000)
+            ToolOutcome::ok(clip(&names.join("\n"), 8000))
         }
     }
 
-    async fn glob(&self, args: &Value) -> String {
+    async fn glob(&self, args: &Value) -> ToolOutcome {
         let pattern = match arg_str(args, "pattern") {
             Some(p) => p,
-            None => return "error: glob needs a pattern".into(),
+            None => return ToolOutcome::err("error: glob needs a pattern"),
         };
         if pattern.starts_with('/') || pattern.split('/').any(|s| s == "..") {
-            return "error: pattern must stay within the repo (no leading / or '..')".into();
+            return ToolOutcome::err(
+                "error: pattern must stay within the repo (no leading / or '..')",
+            );
         }
         let norm = if pattern.contains('/') {
             pattern.to_string()
@@ -271,7 +303,7 @@ impl Tools {
         };
         let matcher = match glob::Pattern::new(&norm) {
             Ok(m) => m,
-            Err(e) => return format!("error: {e}"),
+            Err(e) => return ToolOutcome::err(format!("error: {e}")),
         };
         // Respect .gitignore via git ls-files; fall back to a filesystem walk.
         let mut hits: Vec<String> = Vec::new();
@@ -312,7 +344,7 @@ impl Tools {
         hits.sort();
         hits.dedup();
         if hits.is_empty() {
-            return "no matches".into();
+            return ToolOutcome::ok("no matches");
         }
         let shown: String = hits
             .iter()
@@ -321,20 +353,20 @@ impl Tools {
             .collect::<Vec<_>>()
             .join("\n");
         if hits.len() > 100 {
-            format!("{shown}\n… (+{} more)", hits.len() - 100)
+            ToolOutcome::ok(format!("{shown}\n… (+{} more)", hits.len() - 100))
         } else {
-            shown
+            ToolOutcome::ok(shown)
         }
     }
 
-    async fn grep(&self, args: &Value) -> String {
+    async fn grep(&self, args: &Value) -> ToolOutcome {
         let pattern = match arg_str(args, "pattern") {
             Some(p) => p,
-            None => return "error: grep needs a pattern".into(),
+            None => return ToolOutcome::err("error: grep needs a pattern"),
         };
         let where_ = arg_str(args, "path").unwrap_or(".");
         if let Err(e) = safe_resolve(&self.root, where_) {
-            return format!("error: {e}");
+            return ToolOutcome::err(format!("error: {e}"));
         }
         let root = self.root_str();
         let (out, code) = match run(
@@ -361,11 +393,11 @@ impl Tools {
             .await
             {
                 Ok(o) => (o.stdout, o.exit_code),
-                Err(e) => return format!("error: {e}"),
+                Err(e) => return ToolOutcome::err(format!("error: {e}")),
             },
         };
         if code == 1 || out.trim().is_empty() {
-            return "no matches".into();
+            return ToolOutcome::ok("no matches");
         }
         let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
         let shown = lines
@@ -375,16 +407,16 @@ impl Tools {
             .collect::<Vec<_>>()
             .join("\n");
         if lines.len() > 50 {
-            format!("{shown}\n… (+{} more matches)", lines.len() - 50)
+            ToolOutcome::ok(format!("{shown}\n… (+{} more matches)", lines.len() - 50))
         } else {
-            shown
+            ToolOutcome::ok(shown)
         }
     }
 
-    async fn bash(&self, args: &Value) -> String {
+    async fn bash(&self, args: &Value) -> ToolOutcome {
         let command = match arg_str(args, "command") {
             Some(c) => c,
-            None => return "error: bash needs a command".into(),
+            None => return ToolOutcome::err("error: bash needs a command"),
         };
         match run(
             &["bash", "-lc", command],
@@ -405,16 +437,19 @@ impl Tools {
                 } else {
                     String::new()
                 };
-                format!(
-                    "{}\n[exit {}]{}",
-                    head_tail(&raw, 4000, 2000),
-                    o.exit_code,
-                    note
+                // The command ran — a non-zero exit is a normal result, not a tool failure.
+                ToolOutcome::ok(
+                    format!(
+                        "{}\n[exit {}]{}",
+                        head_tail(&raw, 4000, 2000),
+                        o.exit_code,
+                        note
+                    )
+                    .trim()
+                    .to_string(),
                 )
-                .trim()
-                .to_string()
             }
-            Err(e) => format!("error: {e}"),
+            Err(e) => ToolOutcome::err(format!("error: {e}")),
         }
     }
 }
@@ -499,4 +534,42 @@ pub fn tool_specs(allow_delegate: bool) -> Vec<ToolSpec> {
         });
     }
     specs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jobs::JobManager;
+
+    fn tools() -> Tools {
+        Tools::new(PathBuf::from("."), JobManager::new(".".to_string()), None)
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_reports_not_ok() {
+        let o = tools().call("no_such_tool", &json!({})).await;
+        assert!(!o.ok);
+        assert!(o.text.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn missing_required_arg_reports_not_ok() {
+        let o = tools().call("read_file", &json!({})).await;
+        assert!(!o.ok);
+    }
+
+    #[tokio::test]
+    async fn reading_a_missing_file_reports_not_ok() {
+        let o = tools()
+            .call("read_file", &json!({ "path": "definitely-not-here.xyz" }))
+            .await;
+        assert!(!o.ok);
+    }
+
+    #[tokio::test]
+    async fn reading_an_existing_file_is_ok() {
+        // the crate manifest is always present when tests run from the crate root
+        let o = tools().call("read_file", &json!({ "path": "Cargo.toml" })).await;
+        assert!(o.ok, "expected ok, got: {}", o.text);
+    }
 }

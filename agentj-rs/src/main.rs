@@ -212,7 +212,7 @@ async fn main() {
         let turn_sess = sess.clone();
         let turn = tokio::spawn(async move {
             let mut messages = vec![ChatMessage::system(system), ChatMessage::user(task)];
-            let _ = agent::run_turn(&turn_sess, &mut messages, &tx, true).await;
+            let _ = agent::run_turn(&turn_sess, &mut messages, &tx, true, None).await;
         });
         let mut failed = false;
         while let Some(ev) = rx.recv().await {

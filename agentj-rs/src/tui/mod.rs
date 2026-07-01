@@ -12,7 +12,7 @@ use crate::agent::{run_turn, Session};
 use crate::events::AgentEvent;
 use crate::provider::ChatMessage;
 use crate::rekey::rekey;
-use app::{App, AppEffect, UiMsg};
+use app::{App, AppEffect, TurnHandle, UiMsg};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -28,33 +28,40 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::time::interval;
 
-/// Spawn a turn: clone history + append the user message, run it in the background, forward its events
-/// as `UiMsg::Agent`, and send `TurnComplete` with the final history when it's done. Returns the abort
-/// handle so Ctrl-C can cancel it (which drops the user turn — history is only committed on completion).
-fn spawn_turn(
-    text: String,
-    history: &[ChatMessage],
-    sess: Session,
-    ui: UnboundedSender<UiMsg>,
-) -> tokio::task::AbortHandle {
+/// Spawn a turn over the current committed history (which already ends with the new user message).
+/// Forwards agent events as `UiMsg::Agent` and committed message deltas as `UiMsg::HistoryDelta`, then
+/// sends `TurnDone`. Returns a `TurnHandle` (abort handle + job watermark) so Ctrl-C can cancel the
+/// turn and kill the background jobs it started.
+fn spawn_turn(history: &[ChatMessage], sess: Session, ui: UnboundedSender<UiMsg>) -> TurnHandle {
+    let job_watermark = sess.tools.jobs.id_watermark();
     let mut msgs = history.to_vec();
-    msgs.push(ChatMessage::user(text));
     let handle = tokio::spawn(async move {
         let (atx, mut arx) = unbounded_channel::<AgentEvent>();
-        let ui_forward = ui.clone();
-        let drain = async move {
+        let (ctx, mut crx) = unbounded_channel::<Vec<ChatMessage>>();
+        let ui_ev = ui.clone();
+        let drain_events = async move {
             while let Some(ev) = arx.recv().await {
-                let _ = ui_forward.send(UiMsg::Agent(ev));
+                let _ = ui_ev.send(UiMsg::Agent(ev));
+            }
+        };
+        let ui_delta = ui.clone();
+        let drain_deltas = async move {
+            while let Some(delta) = crx.recv().await {
+                let _ = ui_delta.send(UiMsg::HistoryDelta(delta));
             }
         };
         let run = async {
-            let _ = run_turn(&sess, &mut msgs, &atx, true).await;
-            drop(atx); // close the channel so the drain finishes
+            let _ = run_turn(&sess, &mut msgs, &atx, true, Some(&ctx)).await;
+            drop(atx); // close the channels so the drains finish
+            drop(ctx);
         };
-        tokio::join!(run, drain);
-        let _ = ui.send(UiMsg::TurnComplete(msgs));
+        tokio::join!(run, drain_events, drain_deltas);
+        let _ = ui.send(UiMsg::TurnDone);
     });
-    handle.abort_handle()
+    TurnHandle {
+        abort: handle.abort_handle(),
+        job_watermark,
+    }
 }
 
 pub async fn run(
@@ -114,20 +121,19 @@ pub async fn run(
                     match app.on_input(ev) {
                         AppEffect::None => {}
                         AppEffect::Quit => app.quit = true,
-                        AppEffect::SpawnTurn(text) => {
+                        AppEffect::SpawnTurn => {
                             app.turn =
-                                Some(spawn_turn(text, &app.messages, sess.clone(), ui_tx.clone()));
+                                Some(spawn_turn(&app.messages, sess.clone(), ui_tx.clone()));
                         }
                         AppEffect::Rekey { reference, desc } => {
                             let rk = rekey(&app.root, &reference).await;
-                            if let Some(text) = app.apply_rekey_result(rk, desc) {
-                                app.turn = Some(spawn_turn(
-                                    text,
-                                    &app.messages,
-                                    sess.clone(),
-                                    ui_tx.clone(),
-                                ));
+                            if let AppEffect::SpawnTurn = app.apply_rekey_result(rk, desc) {
+                                app.turn =
+                                    Some(spawn_turn(&app.messages, sess.clone(), ui_tx.clone()));
                             }
+                        }
+                        AppEffect::KillJobsAfter(watermark) => {
+                            sess.tools.jobs.kill_after(watermark).await;
                         }
                     }
                     if app.quit {

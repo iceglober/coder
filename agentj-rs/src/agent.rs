@@ -112,7 +112,8 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
                 saw_error
             };
             let run = async {
-                let r = run_turn(&sess, &mut sub_msgs, &atx, false).await;
+                // Subagents don't commit deltas — only their final result re-enters the parent.
+                let r = run_turn(&sess, &mut sub_msgs, &atx, false, None).await;
                 drop(atx); // close the channel so the forwarder finishes
                 r
             };
@@ -175,26 +176,37 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
 }
 
 /// Run one turn. `messages` already includes the system prompt, prior history, and the new user turn.
-/// Events stream to `tx`. Returns the model's final assistant text (used as a subagent's result).
+/// Events stream to `tx`. When `commit` is set, each newly appended message (or tool-call group) is
+/// also sent through it as a delta, so the UI can fold completed steps into its history as the turn
+/// progresses — an interrupted turn then keeps whatever already applied. Returns the model's final
+/// assistant text (used as a subagent's result).
 #[async_recursion]
 pub async fn run_turn(
     sess: &Session,
     messages: &mut Vec<ChatMessage>,
     tx: &UnboundedSender<AgentEvent>,
     allow_delegate: bool,
+    commit: Option<&UnboundedSender<Vec<ChatMessage>>>,
 ) -> String {
     let mut specs = tool_specs(allow_delegate);
     specs.extend(sess.tools.mcp_specs()); // MCP tools sit alongside the built-ins (subagents inherit them)
     let mut id: u64 = 0;
     let mut idle_nudges = 0usize;
     let mut final_text = String::new();
+    let commit_delta = |delta: Vec<ChatMessage>| {
+        if let Some(c) = commit {
+            let _ = c.send(delta);
+        }
+    };
 
     for _ in 0..sess.cfg.max_steps {
         // Background jobs are the primary loop's concern only (subagents don't consume nudges).
         if allow_delegate {
-            for n in sess.tools.jobs.drain_nudges().await {
+            for n in sess.tools.jobs.drain_nudges() {
                 let _ = tx.send(AgentEvent::Note(first_line(&n, 100)));
-                messages.push(ChatMessage::user(n));
+                let m = ChatMessage::user(n);
+                commit_delta(vec![m.clone()]);
+                messages.push(m);
             }
         }
 
@@ -221,29 +233,34 @@ pub async fn run_turn(
             }
             final_text = text;
         }
-        messages.push(ChatMessage {
+        let assistant = ChatMessage {
             role: "assistant".into(),
             content: turn.content.clone(),
             tool_calls: turn.tool_calls.clone(),
             tool_call_id: None,
-        });
+        };
+        messages.push(assistant.clone());
 
         if turn.tool_calls.is_empty() {
+            // A bare assistant reply commits on its own.
+            commit_delta(vec![assistant]);
             // The model went idle. If background jobs are still running and it has nothing else to do,
             // wait for the next nudge and continue — it blocks only when there's nothing else to do.
             if allow_delegate
-                && sess.tools.jobs.has_running().await
+                && sess.tools.jobs.has_running()
                 && idle_nudges < sess.cfg.max_idle_nudges
             {
                 let _ = tx.send(AgentEvent::Note("waiting on a background job…".to_string()));
                 match tokio::time::timeout(sess.cfg.idle_wait, sess.tools.jobs.next_nudge()).await {
-                    Ok(Some(n)) => {
+                    Ok(n) => {
                         idle_nudges += 1;
                         let _ = tx.send(AgentEvent::Note(first_line(&n, 100)));
-                        messages.push(ChatMessage::user(n));
+                        let m = ChatMessage::user(n);
+                        commit_delta(vec![m.clone()]);
+                        messages.push(m);
                         continue;
                     }
-                    _ => {
+                    Err(_) => {
                         let _ = tx.send(AgentEvent::Note("still waiting on a background job — ending the turn; job_check it next time.".to_string()));
                     }
                 }
@@ -252,55 +269,48 @@ pub async fn run_turn(
             return final_text;
         }
 
+        // Commit the assistant message and all its tool replies together, so an interrupt can't leave
+        // a dangling `tool_calls` request without its matching tool responses in the committed history.
+        let mut delta = vec![assistant];
         for tc in &turn.tool_calls {
             id += 1;
             let args: Value = serde_json::from_str(&tc.function.arguments)
                 .unwrap_or_else(|_| serde_json::json!({}));
 
             // `delegate` is intercepted here (not run through tools.call) so it can spawn nested loops.
-            if allow_delegate && tc.function.name == "delegate" {
-                let _ = tx.send(AgentEvent::ToolStart {
-                    id,
-                    name: "delegate".to_string(),
-                    args: first_line(&tc.function.arguments, 100),
-                });
-                let start = Instant::now();
-                let (result, all_ok) = run_delegate(sess, &args, tx).await;
-                let _ = tx.send(AgentEvent::ToolEnd {
-                    id,
-                    ok: all_ok,
-                    elapsed_ms: start.elapsed().as_millis(),
-                    summary: first_line(&result, 60),
-                });
-                messages.push(ChatMessage {
-                    role: "tool".into(),
-                    content: Some(result),
-                    tool_calls: vec![],
-                    tool_call_id: Some(tc.id.clone()),
-                });
-                continue;
-            }
-
+            let (name, is_delegate) = if allow_delegate && tc.function.name == "delegate" {
+                ("delegate".to_string(), true)
+            } else {
+                (tc.function.name.clone(), false)
+            };
             let _ = tx.send(AgentEvent::ToolStart {
                 id,
-                name: tc.function.name.clone(),
+                name,
                 args: first_line(&tc.function.arguments, 100),
             });
             let start = Instant::now();
-            let result = sess.tools.call(&tc.function.name, &args).await;
+            let (text, ok) = if is_delegate {
+                run_delegate(sess, &args, tx).await
+            } else {
+                let o = sess.tools.call(&tc.function.name, &args).await;
+                (o.text, o.ok)
+            };
             let _ = tx.send(AgentEvent::ToolEnd {
                 id,
-                ok: true,
+                ok,
                 elapsed_ms: start.elapsed().as_millis(),
-                summary: first_line(&result, 60),
+                summary: first_line(&text, 60),
             });
-            messages.push(ChatMessage {
+            let tool_msg = ChatMessage {
                 role: "tool".into(),
-                content: Some(result),
+                content: Some(text),
                 tool_calls: vec![],
                 tool_call_id: Some(tc.id.clone()),
-            });
+            };
+            messages.push(tool_msg.clone());
+            delta.push(tool_msg);
         }
+        commit_delta(delta);
     }
 
     let _ = tx.send(AgentEvent::Note(format!(
@@ -379,16 +389,51 @@ mod tests {
         }
     }
 
+    fn turn_tool(name: &str, args: serde_json::Value) -> AssistantTurn {
+        AssistantTurn {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call_x".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: name.into(),
+                    arguments: args.to_string(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+            usage: None,
+        }
+    }
+
     async fn run_and_collect(sess: &Session) -> Vec<AgentEvent> {
         let (tx, mut rx) = unbounded_channel::<AgentEvent>();
         let mut msgs = vec![ChatMessage::system("sys"), ChatMessage::user("go")];
-        let _ = run_turn(sess, &mut msgs, &tx, true).await;
+        let _ = run_turn(sess, &mut msgs, &tx, true, None).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(e) = rx.recv().await {
             events.push(e);
         }
         events
+    }
+
+    /// Run a turn collecting both events and the committed history deltas.
+    async fn run_with_commit(sess: &Session) -> (Vec<AgentEvent>, Vec<Vec<ChatMessage>>) {
+        let (tx, mut rx) = unbounded_channel::<AgentEvent>();
+        let (ctx, mut crx) = unbounded_channel::<Vec<ChatMessage>>();
+        let mut msgs = vec![ChatMessage::system("sys"), ChatMessage::user("go")];
+        let _ = run_turn(sess, &mut msgs, &tx, true, Some(&ctx)).await;
+        drop(tx);
+        drop(ctx);
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+        let mut deltas = Vec::new();
+        while let Some(d) = crx.recv().await {
+            deltas.push(d);
+        }
+        (events, deltas)
     }
 
     #[tokio::test]
@@ -438,6 +483,29 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::ToolEnd { ok: false, .. })));
+    }
+
+    #[tokio::test]
+    async fn commit_deltas_preserve_toolcall_reply_pairing() {
+        let sess = session(vec![
+            ScriptStep::Turn(turn_tool("read_file", serde_json::json!({ "path": "Cargo.toml" }))),
+            ScriptStep::Turn(turn_text("done reading")),
+        ]);
+        let (_events, deltas) = run_with_commit(&sess).await;
+
+        // The assistant message carrying tool_calls and its tool reply land in the SAME delta.
+        let paired = deltas.iter().any(|d| {
+            d.iter().any(|m| m.role == "assistant" && !m.tool_calls.is_empty())
+                && d.iter().any(|m| m.role == "tool")
+        });
+        assert!(
+            paired,
+            "assistant tool_calls and its tool reply must commit together: {deltas:?}"
+        );
+        // The final bare assistant reply commits on its own.
+        assert!(deltas
+            .iter()
+            .any(|d| d.len() == 1 && d[0].role == "assistant" && d[0].tool_calls.is_empty()));
     }
 
     #[tokio::test]

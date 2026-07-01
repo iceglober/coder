@@ -24,8 +24,18 @@ const CHEAT_SHEET: &str = "Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = n
 /// Messages from the turn task into the UI event loop.
 pub enum UiMsg {
     Agent(AgentEvent),
-    /// A turn finished: its full message history (feeds the next turn).
-    TurnComplete(Vec<ChatMessage>),
+    /// Newly committed history — an assistant reply, a tool-call group, or a nudge — appended as the
+    /// turn progresses so an interrupt keeps whatever already applied.
+    HistoryDelta(Vec<ChatMessage>),
+    /// The turn task finished (natural completion or clean stop).
+    TurnDone,
+}
+
+/// A running turn: its abort handle plus the job-id watermark captured at spawn, so an interrupt can
+/// kill exactly the background jobs this turn started.
+pub struct TurnHandle {
+    pub abort: AbortHandle,
+    pub job_watermark: u64,
 }
 
 /// Work the event loop must perform after a state transition (it needs `.await` or the turn task's
@@ -33,10 +43,12 @@ pub enum UiMsg {
 pub enum AppEffect {
     None,
     Quit,
-    /// Spawn a turn for this user text; the loop stores the resulting abort handle in `App::turn`.
-    SpawnTurn(String),
+    /// Spawn a turn from the current committed history; the loop stores the handle in `App::turn`.
+    SpawnTurn,
     /// Run a `/task` re-key, then feed the result back via `apply_rekey_result`.
     Rekey { reference: String, desc: String },
+    /// SIGKILL background jobs started at or after this watermark (an interrupted turn's jobs).
+    KillJobsAfter(u64),
 }
 
 pub struct App {
@@ -51,7 +63,7 @@ pub struct App {
     pub input_cache: InputLayoutCache,
     // turn state
     pub running: bool,
-    pub turn: Option<AbortHandle>,
+    pub turn: Option<TurnHandle>,
     pub since: Instant,
     pub status: String,
     pub current_tool: String,
@@ -196,10 +208,7 @@ impl App {
                 self.complete();
                 AppEffect::None
             }
-            Action::AbortTurn => {
-                self.abort_turn();
-                AppEffect::None
-            }
+            Action::AbortTurn => self.abort_turn(),
             Action::CtrlC => self.ctrl_c(),
             Action::Submit(text) => self.submit(text),
         }
@@ -237,15 +246,23 @@ impl App {
         }
     }
 
-    fn abort_turn(&mut self) {
-        if let Some(h) = self.turn.take() {
-            h.abort();
-        }
+    fn abort_turn(&mut self) -> AppEffect {
         self.running = false;
         self.status.clear();
         self.transcript.push(dim_line("[interrupted]"));
         self.follow = true;
         self.set_effect("interrupted");
+        match self.turn.take() {
+            Some(t) => {
+                t.abort.abort();
+                // Orient the model next turn: side effects (edits, commits) may already have applied.
+                self.messages.push(ChatMessage::user(
+                    "[note: the previous request was interrupted by the user; some tool actions may have already applied]",
+                ));
+                AppEffect::KillJobsAfter(t.job_watermark)
+            }
+            None => AppEffect::None,
+        }
     }
 
     fn ctrl_c(&mut self) -> AppEffect {
@@ -275,11 +292,12 @@ impl App {
             self.submit_task(&text)
         } else {
             self.transcript.push(Line::from(format!("› {text}")));
+            self.messages.push(ChatMessage::user(text));
             self.running = true;
             self.since = Instant::now();
             self.status.clear();
             self.set_effect("let's cook");
-            AppEffect::SpawnTurn(text)
+            AppEffect::SpawnTurn
         }
     }
 
@@ -304,8 +322,9 @@ impl App {
         }
     }
 
-    /// Fold a completed `/task` re-key into state. Returns the task description to spawn, if any.
-    pub fn apply_rekey_result(&mut self, rk: RekeyResult, desc: String) -> Option<String> {
+    /// Fold a completed `/task` re-key into state. Returns `SpawnTurn` when a task description should
+    /// start a turn, else `None`.
+    pub fn apply_rekey_result(&mut self, rk: RekeyResult, desc: String) -> AppEffect {
         for s in &rk.steps {
             self.transcript.push(dim_line(format!("  · {s}")));
         }
@@ -315,7 +334,7 @@ impl App {
                 rk.error.unwrap_or_default()
             )));
             self.set_effect("re-key failed");
-            return None;
+            return AppEffect::None;
         }
         let branch = rk.branch.unwrap_or_default();
         self.transcript
@@ -323,25 +342,29 @@ impl App {
         self.set_effect(format!("switched to {branch}"));
         self.messages = vec![ChatMessage::system(self.system.clone())];
         if desc.is_empty() {
-            None
+            AppEffect::None
         } else {
             self.transcript.push(Line::from(format!("› {desc}")));
+            self.messages.push(ChatMessage::user(desc));
             self.running = true;
             self.since = Instant::now();
             self.status.clear();
             self.last_effect_active = true;
             self.dirty = true;
-            Some(desc)
+            AppEffect::SpawnTurn
         }
     }
 
     pub fn on_ui(&mut self, msg: UiMsg) {
         match msg {
             UiMsg::Agent(ev) => self.on_agent(ev),
-            UiMsg::TurnComplete(m) => {
-                self.messages = m;
+            UiMsg::HistoryDelta(delta) => {
+                self.messages.extend(delta);
+            }
+            UiMsg::TurnDone => {
                 self.running = false;
                 self.status.clear();
+                self.turn = None;
                 if self.effect_label.is_empty() {
                     self.effect_until = Some(Instant::now() + EFFECT_TTL);
                     self.effect_label = "all set".to_string();
@@ -459,9 +482,32 @@ mod tests {
         let mut a = app();
         a.editor.insert_str("hello");
         let effect = a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(effect, AppEffect::SpawnTurn(t) if t == "hello"));
+        assert!(matches!(effect, AppEffect::SpawnTurn));
         assert!(a.running);
         assert!(a.editor.text().is_empty());
+        // the user message is committed to history up front (spawn_turn clones it)
+        assert!(a
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.content.as_deref() == Some("hello")));
+    }
+
+    #[tokio::test]
+    async fn abort_pushes_interrupt_marker_and_kills_jobs() {
+        let mut a = app();
+        let abort = tokio::spawn(std::future::pending::<()>()).abort_handle();
+        a.turn = Some(TurnHandle {
+            abort,
+            job_watermark: 7,
+        });
+        a.running = true;
+        let effect = a.abort_turn();
+        assert!(matches!(effect, AppEffect::KillJobsAfter(7)));
+        assert!(!a.running);
+        assert!(a.messages.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains("interrupted by the user"))));
     }
 
     #[test]

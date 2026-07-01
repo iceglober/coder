@@ -36,17 +36,22 @@ pub async fn run(
     let mut child = cmd.spawn()?;
     let pid = child.id().map(|p| p as i32);
 
-    // Drain stdout/stderr concurrently so a full pipe can't deadlock the child.
-    let mut out = child.stdout.take().expect("piped stdout");
-    let mut err = child.stderr.take().expect("piped stderr");
+    // Drain stdout/stderr concurrently so a full pipe can't deadlock the child. The pipes are always
+    // present (we set `Stdio::piped()` above), but tolerate their absence rather than panic.
+    let out = child.stdout.take();
+    let err = child.stderr.take();
     let out_task = tokio::spawn(async move {
         let mut buf = Vec::new();
-        let _ = out.read_to_end(&mut buf).await;
+        if let Some(mut out) = out {
+            let _ = out.read_to_end(&mut buf).await;
+        }
         buf
     });
     let err_task = tokio::spawn(async move {
         let mut buf = Vec::new();
-        let _ = err.read_to_end(&mut buf).await;
+        if let Some(mut err) = err {
+            let _ = err.read_to_end(&mut buf).await;
+        }
         buf
     });
 
