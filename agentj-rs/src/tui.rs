@@ -27,7 +27,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -435,6 +435,7 @@ pub async fn run(
                             .borders(Borders::BOTTOM)
                             .border_style(Style::default().fg(accent)),
                     )
+                    .wrap(Wrap { trim: false })
                     .scroll((scroll, 0)),
                 rows[0],
             );
