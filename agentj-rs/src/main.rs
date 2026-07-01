@@ -3,6 +3,7 @@
 
 mod agent;
 mod commands;
+mod config;
 mod events;
 mod exec;
 mod jobs;
@@ -14,6 +15,7 @@ mod rekey;
 mod subagent;
 mod tools;
 mod tui;
+mod util;
 
 use events::AgentEvent;
 use model::{preflight, resolve_model, resolve_provider, Provider, Selector};
@@ -190,6 +192,11 @@ async fn main() {
 
     let jobs = jobs::JobManager::new(root.clone());
     let tools = Tools::new(PathBuf::from(&root), jobs.clone(), mcp_clients);
+    let sess = agent::Session {
+        llm: Arc::new(llm),
+        tools: Arc::new(tools),
+        cfg: Arc::new(config::Config::from_env()),
+    };
 
     if !std::io::stdin().is_terminal() && args.once.is_none() {
         eprintln!("stdin is not a terminal; interactive chat needs a TTY. Use --once \"<task>\" for headless runs.");
@@ -201,12 +208,11 @@ async fn main() {
         for n in &mcp_notices {
             eprintln!("! {n}");
         }
-        let mut messages = vec![ChatMessage::system(system), ChatMessage::user(task)];
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-        let llm = Arc::new(llm);
-        let tools = Arc::new(tools);
+        let turn_sess = sess.clone();
         let turn = tokio::spawn(async move {
-            let _ = agent::run_turn(&llm, &tools, &mut messages, &tx, true).await;
+            let mut messages = vec![ChatMessage::system(system), ChatMessage::user(task)];
+            let _ = agent::run_turn(&turn_sess, &mut messages, &tx, true).await;
         });
         let mut failed = false;
         while let Some(ev) = rx.recv().await {
@@ -234,7 +240,7 @@ async fn main() {
         return;
     }
 
-    let result = tui::run(cfg.model_id.clone(), root, system, llm, tools, mcp_notices).await;
+    let result = tui::run(cfg.model_id.clone(), root, system, sess, mcp_notices).await;
     jobs.kill_all().await;
     if let Err(e) = result {
         eprintln!("agentj: {e}");

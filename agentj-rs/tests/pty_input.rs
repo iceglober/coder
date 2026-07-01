@@ -93,9 +93,12 @@ fn run_once_with_input(input: &[u8]) -> String {
         })
         .expect("openpty");
 
+    // `custom` provider is satisfied entirely by --base-url + --model, so the harness needs no
+    // ambient credentials (azure would require AZURE_BASE_URL/AZURE_API_KEY). The endpoint is a dead
+    // port on purpose: these tests exercise input editing, never a live turn.
     let mut cmd = CommandBuilder::new(bin_path());
     cmd.arg("--provider");
-    cmd.arg("azure");
+    cmd.arg("custom");
     cmd.arg("--model");
     cmd.arg("dummy");
     cmd.arg("--base-url");

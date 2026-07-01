@@ -2,6 +2,7 @@
 //! everything, fetch, and re-point the worktree at a clean base from origin.
 
 use crate::exec::run;
+use crate::util::first_line as first_nonblank;
 use std::path::Path;
 use std::time::Duration;
 
@@ -24,14 +25,6 @@ pub fn is_pr(reference: &str) -> bool {
     !reference.is_empty() && reference.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn first_line(s: &str) -> String {
-    s.lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .to_string()
-}
-
 /// Wipe the worktree, fetch, and re-key onto `reference` — a clean base from origin. Never panics.
 pub async fn rekey(root: &str, reference: &str) -> RekeyResult {
     let mut steps: Vec<String> = Vec::new();
@@ -39,16 +32,17 @@ pub async fn rekey(root: &str, reference: &str) -> RekeyResult {
         // Build argv from static + owned parts, run, and record a step line.
         async move {
             let owned_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
-            let full: Vec<&str> = argv.into_iter().chain(owned_refs.into_iter()).collect();
+            let full: Vec<&str> = argv.into_iter().chain(owned_refs).collect();
             let r = run(&full, root, timeout).await;
             match r {
                 Ok(o) => {
                     let mut line = full.join(" ");
                     if o.exit_code != 0 {
-                        let msg = if !first_line(&o.stderr).is_empty() {
-                            first_line(&o.stderr)
+                        let stderr_line = first_nonblank(&o.stderr, usize::MAX);
+                        let msg = if !stderr_line.is_empty() {
+                            stderr_line
                         } else {
-                            first_line(&o.stdout)
+                            first_nonblank(&o.stdout, usize::MAX)
                         };
                         line = format!("{line} — exit {}: {msg}", o.exit_code);
                     }
