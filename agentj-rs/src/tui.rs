@@ -51,40 +51,53 @@ const KEYBOARD_FLAGS: KeyboardEnhancementFlags = KeyboardEnhancementFlags::DISAM
 struct Editor {
     text: String,
     cursor: usize,
+    revision: u64,
 }
 
 impl Editor {
     fn text(&self) -> &str {
         &self.text
     }
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
     fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.touch();
     }
     /// Replace the whole buffer (used by Tab completion); cursor to the end.
     fn set(&mut self, s: String) {
         self.cursor = s.len();
         self.text = s;
+        self.touch();
     }
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        self.touch();
     }
     fn insert_str(&mut self, s: &str) {
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
+        self.touch();
     }
     fn backspace(&mut self) {
         if self.cursor > 0 {
             let p = self.prev(self.cursor);
             self.text.replace_range(p..self.cursor, "");
             self.cursor = p;
+            self.touch();
         }
     }
     fn delete(&mut self) {
         if self.cursor < self.text.len() {
             let n = self.next(self.cursor);
             self.text.replace_range(self.cursor..n, "");
+            self.touch();
         }
     }
     fn delete_word_left(&mut self) {
@@ -92,6 +105,7 @@ impl Editor {
         self.word_left();
         if self.cursor < end {
             self.text.replace_range(self.cursor..end, "");
+            self.touch();
         }
     }
     fn delete_word_right(&mut self) {
@@ -101,12 +115,14 @@ impl Editor {
         self.cursor = start;
         if start < end {
             self.text.replace_range(start..end, "");
+            self.touch();
         }
     }
     fn delete_to_buffer_home(&mut self) {
         if self.cursor > 0 {
             self.text.replace_range(0..self.cursor, "");
             self.cursor = 0;
+            self.touch();
         }
     }
     fn delete_to_line_end(&mut self) {
@@ -116,16 +132,19 @@ impl Editor {
             .unwrap_or(self.text.len());
         if self.cursor < end {
             self.text.replace_range(self.cursor..end, "");
+            self.touch();
         }
     }
     fn left(&mut self) {
         if self.cursor > 0 {
             self.cursor = self.prev(self.cursor);
+            self.touch();
         }
     }
     fn right(&mut self) {
         if self.cursor < self.text.len() {
             self.cursor = self.next(self.cursor);
+            self.touch();
         }
     }
     fn word_left(&mut self) {
@@ -149,7 +168,10 @@ impl Editor {
             }
             i = p;
         }
-        self.cursor = i;
+        if self.cursor != i {
+            self.cursor = i;
+            self.touch();
+        }
     }
     fn word_right(&mut self) {
         if self.cursor >= self.text.len() {
@@ -172,25 +194,43 @@ impl Editor {
             }
             i = n;
         }
-        self.cursor = i;
+        if self.cursor != i {
+            self.cursor = i;
+            self.touch();
+        }
     }
     fn home(&mut self) {
-        self.cursor = self.text[..self.cursor]
+        let cursor = self.text[..self.cursor]
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
+        if self.cursor != cursor {
+            self.cursor = cursor;
+            self.touch();
+        }
     }
     fn end(&mut self) {
-        self.cursor = self.text[self.cursor..]
+        let cursor = self.text[self.cursor..]
             .find('\n')
             .map(|i| self.cursor + i)
             .unwrap_or(self.text.len());
+        if self.cursor != cursor {
+            self.cursor = cursor;
+            self.touch();
+        }
     }
     fn buffer_home(&mut self) {
-        self.cursor = 0;
+        if self.cursor != 0 {
+            self.cursor = 0;
+            self.touch();
+        }
     }
     fn buffer_end(&mut self) {
-        self.cursor = self.text.len();
+        let cursor = self.text.len();
+        if self.cursor != cursor {
+            self.cursor = cursor;
+            self.touch();
+        }
     }
     fn up(&mut self) {
         self.vmove(true);
@@ -212,40 +252,98 @@ impl Editor {
         }
         j
     }
+    fn line_start_before(&self, cursor: usize) -> usize {
+        self.text[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    }
+
+    fn line_end_after(&self, cursor: usize) -> usize {
+        self.text[cursor..]
+            .find('\n')
+            .map(|i| cursor + i)
+            .unwrap_or(self.text.len())
+    }
+
+    fn column_in_line(&self, line_start: usize, cursor: usize) -> usize {
+        self.text[line_start..cursor].chars().count()
+    }
+
+    fn byte_for_column(line: &str, col: usize) -> usize {
+        line.char_indices()
+            .nth(col)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len())
+    }
+
     /// (row, column) of the cursor, both 0-based, column counted in chars.
     fn row_col(&self) -> (u16, u16) {
         let before = &self.text[..self.cursor];
         let row = before.bytes().filter(|&b| b == b'\n').count() as u16;
-        let col = before.rsplit('\n').next().unwrap_or("").chars().count() as u16;
+        let col = self.column_in_line(self.line_start_before(self.cursor), self.cursor) as u16;
         (row, col)
     }
+
     /// Move the cursor up/down one line, keeping the target column where possible.
     fn vmove(&mut self, up: bool) {
-        let (row, col) = self.row_col();
-        let lines: Vec<&str> = self.text.split('\n').collect();
-        let target = if up {
-            if row == 0 {
+        let current_start = self.line_start_before(self.cursor);
+        let current_end = self.line_end_after(self.cursor);
+        let col = self.column_in_line(current_start, self.cursor);
+
+        let (target_start, target_end) = if up {
+            if current_start == 0 {
                 return;
             }
-            (row - 1) as usize
+            let prev_end = current_start - 1;
+            let prev_start = self.line_start_before(prev_end);
+            (prev_start, prev_end)
         } else {
-            if row as usize + 1 >= lines.len() {
+            if current_end == self.text.len() {
                 return;
             }
-            (row + 1) as usize
+            let next_start = current_end + 1;
+            let next_end = self.line_end_after(next_start);
+            (next_start, next_end)
         };
-        let mut off = 0usize;
-        for r in 0..target {
-            off += lines[r].len() + 1; // + '\n'
+
+        let line = &self.text[target_start..target_end];
+        let target_col = col.min(line.chars().count());
+        let target = target_start + Self::byte_for_column(line, target_col);
+        if self.cursor != target {
+            self.cursor = target;
+            self.touch();
         }
-        let line = lines[target];
-        let tcol = (col as usize).min(line.chars().count());
-        let byte_in_line = line
-            .char_indices()
-            .nth(tcol)
-            .map(|(b, _)| b)
-            .unwrap_or(line.len());
-        self.cursor = off + byte_in_line;
+    }
+}
+
+struct InputLayoutCache {
+    revision: u64,
+    width: u16,
+    rows: u16,
+    rendered: Text<'static>,
+    cursor: (u16, u16),
+}
+
+impl Default for InputLayoutCache {
+    fn default() -> Self {
+        Self {
+            revision: u64::MAX,
+            width: 0,
+            rows: 1,
+            rendered: Text::from(""),
+            cursor: (0, 0),
+        }
+    }
+}
+
+impl InputLayoutCache {
+    fn refresh(&mut self, editor: &Editor, width: u16) {
+        if self.revision == editor.revision() && self.width == width {
+            return;
+        }
+        self.revision = editor.revision();
+        self.width = width;
+        self.rows = input_rows(editor.text(), width);
+        self.rendered = input_lines(editor.text());
+        self.cursor = visual_cursor(editor.text(), editor.cursor, width);
     }
 }
 
@@ -574,6 +672,7 @@ pub async fn run(
         transcript.push(dim_line(format!("! {n}")));
     }
     let mut editor = Editor::default();
+    let mut input_cache = InputLayoutCache::default();
     let mut running = false;
     let mut spinner = 0usize;
     let mut pulse = 0usize;
@@ -601,12 +700,15 @@ pub async fn run(
     });
     let mut ticker = interval(Duration::from_millis(120));
 
+    let mut dirty = true;
+    let mut last_effect_active = false;
     let mut quit = false;
     while !quit {
-        terminal.draw(|f| {
+        if dirty {
+            input_cache.refresh(&editor, terminal.size()?.width);
+            terminal.draw(|f| {
             let area = f.area();
-            let input_width = area.width;
-            let in_h = input_rows(editor.text(), input_width);
+            let in_h = input_cache.rows;
             let rows = Layout::vertical([
                 Constraint::Min(1),
                 Constraint::Length(1),
@@ -676,71 +778,94 @@ pub async fn run(
 
             // Input line(s) + a real cursor.
             f.render_widget(
-                Paragraph::new(input_lines(editor.text())).wrap(Wrap { trim: false }),
+                Paragraph::new(input_cache.rendered.clone()).wrap(Wrap { trim: false }),
                 rows[2],
             );
-            let (crow, ccol) = visual_cursor(editor.text(), editor.cursor, rows[2].width);
+            let (crow, ccol) = input_cache.cursor;
             f.set_cursor_position(Position::new(
                 (rows[2].x + 2 + ccol).min(rows[2].x + rows[2].width.saturating_sub(1)),
                 (rows[2].y + crow).min(rows[2].y + rows[2].height.saturating_sub(1)),
             ));
         })?;
+            dirty = false;
+        }
 
         tokio::select! {
             _ = ticker.tick() => {
-                spinner = spinner.wrapping_add(1);
-                pulse = pulse.wrapping_add(1);
-                if effect_until.is_some_and(|until| until <= Instant::now()) {
-                    effect_until = None;
-                    effect_label.clear();
+                let now = Instant::now();
+                let effect_active = effect_until.is_some_and(|until| until > now);
+                let had_effect = last_effect_active;
+                if running || effect_active || had_effect {
+                    spinner = spinner.wrapping_add(1);
+                    pulse = pulse.wrapping_add(1);
+                    if effect_until.is_some_and(|until| until <= now) {
+                        effect_until = None;
+                        effect_label.clear();
+                    }
+                    let now_effect_active = effect_until.is_some_and(|until| until > now);
+                    dirty = true;
+                    last_effect_active = now_effect_active;
                 }
             }
             Some(ev) = in_rx.recv() => {
-                match ev {
-                    Event::Paste(s) if !running => editor.insert_str(&s),
+                let mut pending = vec![ev];
+                while let Ok(ev) = in_rx.try_recv() {
+                    pending.push(ev);
+                }
+                for ev in pending {
+                    match ev {
+                    Event::Paste(s) if !running => {
+                        editor.insert_str(&s);
+                        dirty = true;
+                    }
                     Event::Mouse(m) => match m.kind {
                         MouseEventKind::ScrollUp => {
                             follow = false;
                             scroll = scroll.saturating_sub(3);
+                            dirty = true;
                         }
                         MouseEventKind::ScrollDown => {
                             scroll = scroll.saturating_add(3);
+                            dirty = true;
                         }
                         _ => {}
                     },
+                    Event::Resize(_, _) => dirty = true,
                     Event::Key(k) if k.kind != KeyEventKind::Release => {
                         match key_to_action(k, running, editor.text()) {
                             Action::None => {}
                             Action::Quit => quit = true,
-                            Action::ClearInput => editor.clear(),
-                            Action::Char(c) => editor.insert_char(c),
-                            Action::Newline => editor.insert_char('\n'),
-                            Action::Backspace => editor.backspace(),
-                            Action::Delete => editor.delete(),
-                            Action::DeleteWordLeft => editor.delete_word_left(),
-                            Action::DeleteWordRight => editor.delete_word_right(),
-                            Action::DeleteToBufferHome => editor.delete_to_buffer_home(),
-                            Action::DeleteToLineEnd => editor.delete_to_line_end(),
-                            Action::Left => editor.left(),
-                            Action::Right => editor.right(),
-                            Action::WordLeft => editor.word_left(),
-                            Action::WordRight => editor.word_right(),
-                            Action::Up => editor.up(),
-                            Action::Down => editor.down(),
-                            Action::Home => editor.home(),
-                            Action::End => editor.end(),
-                            Action::ScrollUp => { follow = false; scroll = scroll.saturating_sub(1); }
-                            Action::ScrollDown => { scroll = scroll.saturating_add(1); }
-                            Action::PageUp => { follow = false; scroll = scroll.saturating_sub(10); }
-                            Action::PageDown => { scroll = scroll.saturating_add(10); }
+                            Action::ClearInput => { editor.clear(); dirty = true; }
+                            Action::Char(c) => { editor.insert_char(c); dirty = true; }
+                            Action::Newline => { editor.insert_char('\n'); dirty = true; }
+                            Action::Backspace => { editor.backspace(); dirty = true; }
+                            Action::Delete => { editor.delete(); dirty = true; }
+                            Action::DeleteWordLeft => { editor.delete_word_left(); dirty = true; }
+                            Action::DeleteWordRight => { editor.delete_word_right(); dirty = true; }
+                            Action::DeleteToBufferHome => { editor.delete_to_buffer_home(); dirty = true; }
+                            Action::DeleteToLineEnd => { editor.delete_to_line_end(); dirty = true; }
+                            Action::Left => { editor.left(); dirty = true; }
+                            Action::Right => { editor.right(); dirty = true; }
+                            Action::WordLeft => { editor.word_left(); dirty = true; }
+                            Action::WordRight => { editor.word_right(); dirty = true; }
+                            Action::Up => { editor.up(); dirty = true; }
+                            Action::Down => { editor.down(); dirty = true; }
+                            Action::Home => { editor.home(); dirty = true; }
+                            Action::End => { editor.end(); dirty = true; }
+                            Action::ScrollUp => { follow = false; scroll = scroll.saturating_sub(1); dirty = true; }
+                            Action::ScrollDown => { scroll = scroll.saturating_add(1); dirty = true; }
+                            Action::PageUp => { follow = false; scroll = scroll.saturating_sub(10); dirty = true; }
+                            Action::PageDown => { scroll = scroll.saturating_add(10); dirty = true; }
                             Action::Complete => {
                                 let c = complete_command(editor.text(), SLASH_COMMANDS);
                                 let had_candidates = !c.candidates.is_empty();
                                 editor.set(c.line);
+                                dirty = true;
                                 if had_candidates || editor.text() == "/" {
                                     for cand in SLASH_COMMANDS {
                                         transcript.push(dim_line(format!("  {}  {}", cand.name, cand.summary)));
                                     }
+                                    dirty = true;
                                 }
                             }
                             Action::AbortTurn => {
@@ -751,6 +876,8 @@ pub async fn run(
                                 effect_label = "interrupted".to_string();
                                 transcript.push(dim_line("[interrupted]"));
                                 follow = true;
+                                dirty = true;
+                                last_effect_active = true;
                             }
                             Action::CtrlC => {
                                 let now = Instant::now();
@@ -761,11 +888,14 @@ pub async fn run(
                                     editor.clear(); // first Ctrl-C also clears any typed input
                                     effect_until = Some(now + DOUBLE_TAP);
                                     effect_label = "press Ctrl-C again to quit".to_string();
+                                    dirty = true;
+                                    last_effect_active = true;
                                 }
                             }
                             Action::Submit(text) => {
                                 editor.clear();
                                 follow = true;
+                                dirty = true;
                                 if text.is_empty() {
                                     // nothing
                                 } else if text == "/exit" || text == "/quit" {
@@ -785,11 +915,15 @@ pub async fn run(
                                             effect_until = Some(Instant::now() + EFFECT_TTL);
                                             effect_label = "re-key failed".to_string();
                                             transcript.push(dim_line(format!("» re-key failed: {}", rk.error.unwrap_or_default())));
+                                            dirty = true;
+                                            last_effect_active = true;
                                         } else {
                                             effect_until = Some(Instant::now() + EFFECT_TTL);
                                             effect_label = format!("switched to {}", rk.branch.clone().unwrap_or_default());
                                             transcript.push(dim_line(format!("» clean on {}, synced to origin", rk.branch.clone().unwrap_or_default())));
                                             messages = vec![ChatMessage::system(system.clone())];
+                                            dirty = true;
+                                            last_effect_active = true;
                                             let desc = rest[reference.len()..].trim().to_string();
                                             if !desc.is_empty() {
                                                 transcript.push(Line::from(format!("› {desc}")));
@@ -797,6 +931,8 @@ pub async fn run(
                                                 since = Instant::now();
                                                 status.clear();
                                                 turn_abort = Some(spawn_turn(desc, &messages, llm.clone(), tools.clone(), ui_tx.clone()));
+                                                dirty = true;
+                                                last_effect_active = true;
                                             }
                                         }
                                     }
@@ -808,44 +944,68 @@ pub async fn run(
                                     effect_until = Some(Instant::now() + EFFECT_TTL);
                                     effect_label = "let's cook".to_string();
                                     turn_abort = Some(spawn_turn(text, &messages, llm.clone(), tools.clone(), ui_tx.clone()));
+                                    dirty = true;
+                                    last_effect_active = true;
                                 }
                             }
                         }
                     }
                     _ => {}
                 }
+                if quit {
+                    break;
+                }
+                }
             }
             Some(msg) = ui_rx.recv() => {
-                match msg {
+                let mut pending = vec![msg];
+                while let Ok(msg) = ui_rx.try_recv() {
+                    pending.push(msg);
+                }
+                for msg in pending {
+                    match msg {
                     UiMsg::Agent(ev) => match ev {
                         AgentEvent::Message(t) => {
                             effect_until = Some(Instant::now() + EFFECT_TTL);
                             effect_label = "new reply".to_string();
                             transcript.extend(assistant_lines(&t));
+                            dirty = true;
+                            last_effect_active = true;
                         }
                         AgentEvent::ToolStart { name, args, .. } => {
                             current_tool = format!("{name}({args})");
                             status = current_tool.clone();
                             effect_until = Some(Instant::now() + EFFECT_TTL);
                             effect_label = format!("tool: {name}");
+                            dirty = true;
+                            last_effect_active = true;
                         }
                         AgentEvent::ToolEnd { summary, elapsed_ms, .. } => {
                             transcript.push(dim_line(format!("· {current_tool} — {} {summary}", fmt_ms(elapsed_ms))));
                             status = "thinking".to_string();
                             effect_until = Some(Instant::now() + EFFECT_TTL);
                             effect_label = format!("done in {}", fmt_ms(elapsed_ms));
+                            dirty = true;
+                            last_effect_active = true;
                         }
-                        AgentEvent::Note(t) => transcript.push(dim_line(format!("» {t}"))),
+                        AgentEvent::Note(t) => {
+                            transcript.push(dim_line(format!("» {t}")));
+                            dirty = true;
+                        }
                         AgentEvent::Error(e) => {
                             effect_until = Some(Instant::now() + EFFECT_TTL);
                             effect_label = "error".to_string();
-                            transcript.push(Line::from(Span::styled(format!("[error] {e}"), Style::default().fg(Color::Red))))
+                            transcript.push(Line::from(Span::styled(format!("[error] {e}"), Style::default().fg(Color::Red))));
+                            dirty = true;
+                            last_effect_active = true;
                         }
                         AgentEvent::Done => {
                             running = false;
                             status.clear();
                             effect_until = Some(Instant::now() + EFFECT_TTL);
                             effect_label = "all set".to_string();
+                            dirty = true;
+                            last_effect_active = true;
                         }
                     },
                     UiMsg::TurnComplete(m) => {
@@ -855,8 +1015,11 @@ pub async fn run(
                         if effect_label.is_empty() {
                             effect_until = Some(Instant::now() + EFFECT_TTL);
                             effect_label = "all set".to_string();
+                            last_effect_active = true;
                         }
+                        dirty = true;
                     }
+                }
                 }
             }
         }
