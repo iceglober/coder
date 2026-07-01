@@ -15,9 +15,9 @@ use crate::rekey::{is_linked_worktree, rekey};
 use crate::tools::Tools;
 
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -457,7 +457,12 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     // Ask for progressive keyboard reporting so Shift/Ctrl/Alt+Enter are distinguishable where the
     // terminal supports it (kitty/ghostty/wezterm/newer iTerm2); a no-op elsewhere.
     let _ = execute!(
@@ -471,7 +476,7 @@ pub async fn run(
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(system.clone())];
     let mut transcript: Vec<Line<'static>> = vec![
         dim_line(format!("agentj · {model_id} · {root}")),
-        dim_line("Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = newline · ⌥←/→ skip words · ⌘←/→ start/end · ←/→/↑/↓ move cursor · PageUp/Dn or Ctrl+↑/↓ scroll · /task <pr|branch> · Ctrl-C interrupts · Ctrl-D or /exit quits"),
+        dim_line("Enter submits · Alt/Shift/Ctrl+Enter (or Ctrl-J) = newline · ⌥←/→ skip words · ⌘←/→ start/end · ←/→/↑/↓ move cursor · mouse wheel/PageUp/Dn or Ctrl+↑/↓ scroll · /task <pr|branch> · Ctrl-C interrupts · Ctrl-D or /exit quits"),
     ];
     for n in &notices {
         transcript.push(dim_line(format!("! {n}")));
@@ -610,6 +615,16 @@ pub async fn run(
             Some(ev) = in_rx.recv() => {
                 match ev {
                     Event::Paste(s) if !running => editor.insert_str(&s),
+                    Event::Mouse(m) => match m.kind {
+                        MouseEventKind::ScrollUp => {
+                            follow = false;
+                            scroll = scroll.saturating_sub(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            scroll = scroll.saturating_add(3);
+                        }
+                        _ => {}
+                    },
                     Event::Key(k) if k.kind != KeyEventKind::Release => {
                         match key_to_action(k, running, editor.text()) {
                             Action::None => {}
@@ -752,7 +767,8 @@ pub async fn run(
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableMouseCapture
     )?;
     disable_raw_mode()?;
     Ok(())
@@ -761,6 +777,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::MouseEventKind;
 
     fn ed(s: &str) -> Editor {
         let mut e = Editor::default();
@@ -820,6 +837,39 @@ mod tests {
         assert_eq!(input_rows("abcdef", 5), 2);
         assert_eq!(visual_cursor("abcdef", 6, 5), (1, 3));
         assert_eq!(visual_cursor("ab\ncdef", 6, 5), (1, 3));
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_transcript() {
+        let mut scroll = 5u16;
+        let mut follow = true;
+
+        match MouseEventKind::ScrollUp {
+            MouseEventKind::ScrollUp => {
+                follow = false;
+                scroll = scroll.saturating_sub(3);
+            }
+            MouseEventKind::ScrollDown => {
+                scroll = scroll.saturating_add(3);
+            }
+            _ => {}
+        }
+        assert_eq!(scroll, 2);
+        assert!(!follow);
+
+        let before = follow;
+        match MouseEventKind::ScrollDown {
+            MouseEventKind::ScrollUp => {
+                follow = false;
+                scroll = scroll.saturating_sub(3);
+            }
+            MouseEventKind::ScrollDown => {
+                scroll = scroll.saturating_add(3);
+            }
+            _ => {}
+        }
+        assert_eq!(scroll, 5);
+        assert_eq!(follow, before);
     }
 
     #[test]
