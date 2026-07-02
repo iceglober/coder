@@ -77,6 +77,7 @@ pub struct TokenUsage {
 }
 
 /// What the model returned for one step.
+#[derive(Debug)]
 pub struct AssistantTurn {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,

@@ -76,6 +76,15 @@ pub fn system_prompt(cwd: &str, company: Option<&str>) -> String {
     sections.join("\n\n")
 }
 
+/// System prompt for a delegate subagent: the focused-worker identity plus the SAME working context
+/// and project docs the primary agent gets. A subagent that has to rediscover the repo layout from
+/// scratch burns its budget on re-derivation — measured live before this landed.
+pub fn subagent_system_prompt(cwd: &str) -> String {
+    let mut sections = vec![crate::subagent::subagent_prompt(), working_context(cwd)];
+    sections.extend(project_docs(cwd));
+    sections.join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +97,28 @@ mod tests {
         assert!(p.contains("Re-check PLAN as you go"));
         // the hard branch-first rule survives
         assert!(p.contains("STOP and report the git state"));
+    }
+
+    #[test]
+    fn subagents_get_the_same_context_and_project_docs() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentj-subprompt-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "# Map\nRun `make check`.").unwrap();
+
+        let p = subagent_system_prompt(root);
+        assert!(p.contains("focused subagent"), "keeps the worker identity");
+        assert!(p.contains(root), "knows its working directory");
+        assert!(p.contains("Run `make check`."), "gets the project docs");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

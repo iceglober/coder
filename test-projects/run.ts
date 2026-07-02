@@ -51,6 +51,7 @@ interface Task {
   verify?: string; // command must exit 0 (Full tasks: a change makes a suite pass)
   expect?: string[]; // every substring must appear in agentj's output (Question/Investigation)
   expectNoChange?: boolean; // no source files changed vs the fixture (read-only / diagnosis tasks)
+  expectChange?: boolean; // at least one source file must change (guards open-ended tasks whose verify is green on the baseline)
   judge?: string; // a rubric — an LLM grades agentj's DIFF + report against it (ambiguous-hard tasks)
   // Task quality proofs / limits:
   solution?: string; // shell applying the reference solution — --selftest proves verify FAILs before it and PASSes after
@@ -81,6 +82,7 @@ const env = {
 const argv = process.argv.slice(2);
 const selftest = argv.includes("--selftest");
 const allPrompts = argv.includes("--all-prompts");
+const budgetSoft = argv.includes("--budget-soft"); // calibration mode: budget breaches warn instead of fail
 const promptSel = argv.includes("--prompt") ? argv[argv.indexOf("--prompt") + 1] : undefined;
 const filter = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--prompt")[0];
 const tasks = parseJsonc(await readFile(join(HERE, "tasks.jsonc"), "utf8")).filter((t) => !filter || t.id.includes(filter));
@@ -183,8 +185,11 @@ for (const { vname, vtext } of variantsOf(t)) {
     const tokensOut = [...out.matchAll(/tokens: (\d+) in \/ (\d+) out/g)].reduce((a, m) => a + Number(m[2]), 0);
     const subTokens = [...out.matchAll(/· (\d+) tok\b/g)].reduce((a, m) => a + Number(m[1]), 0);
     const totalTokens = tokensIn + subTokens;
+    let budgetNote = "";
     if (t.budgetTokensIn && totalTokens > t.budgetTokensIn) {
-      fails.push(`context budget blown: ~${totalTokens} tokens used > ${t.budgetTokensIn} budget`);
+      const breach = `context budget blown: ~${totalTokens} tokens used > ${t.budgetTokensIn} budget`;
+      if (budgetSoft) budgetNote = ` \x1b[33m*(${breach})\x1b[0m`;
+      else fails.push(breach);
     }
     if (t.verify) {
       const v = await $`bash -lc ${t.verify}`.cwd(cwd).env(runEnv).nothrow().quiet();
@@ -203,6 +208,7 @@ for (const { vname, vtext } of variantsOf(t)) {
     const changed = changedFiles.length ? `changed ${changedFiles.length}: ${changedFiles.slice(0, 6).join(", ")}${changedFiles.length > 6 ? " …" : ""}` : "no source changes";
 
     if (t.expectNoChange && changedFiles.length) fails.push(`expected read-only, but changed: ${changedFiles.join(", ")}`);
+    if (t.expectChange && !changedFiles.length) fails.push("expected source changes, but the diff is empty — the task was not attempted");
     if (t.judge) {
       // LLM judge disabled during the Rust cutover — grade architect tasks on `verify` only for now.
       console.log("    judge: skipped (LLM judge pending the Rust port; grading on verify only)");
@@ -215,7 +221,7 @@ for (const { vname, vtext } of variantsOf(t)) {
       join(RESULTS, "history.jsonl"),
       `${JSON.stringify({ ts: new Date().toISOString(), run: RUN_STAMP, id: t.id, variant: vname || undefined, pass, secs, tokensIn: totalTokens, tokensOut, changedFiles: changedFiles.length, fails })}\n`,
     );
-    console.log(`  ${pass ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"} · ${secs}s · ${changed}`);
+    console.log(`  ${pass ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"} · ${secs}s · ${changed}${budgetNote}`);
     if (!pass) for (const f of fails) console.log(`    \x1b[31m✗\x1b[0m ${f}`);
   } catch (err) {
     results.push({ id: label, pass: false, note: `error: ${err}`, secs: Math.round((Date.now() - started) / 1000) });

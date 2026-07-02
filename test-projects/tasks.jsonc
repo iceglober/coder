@@ -63,6 +63,7 @@
     "needs": ["pnpm"],
     "setup": "pnpm install --silent",
     "verify": "pnpm -r test",
+    "expectChange": true,
     "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/interface mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
     "note": "AMBIGUOUS-HARD (staff+): no spec — agentj designs the abstraction. Graded by the LLM judge on design quality, plus verify that the baseline stays green."
   },
@@ -117,6 +118,7 @@
     "prompt": "The store applies money adjustments (a discount here, an order limit there) ad-hoc, and the team keeps needing new ones — taxes, shipping fees, loyalty credits. Design and implement an EXTENSIBLE pricing pipeline: a clean way to define pricing rules that transform a cart's running total in an explicit order, so adding a new rule type is easy and the order of application is clear. Decide the abstraction yourself, wire at least two concrete rules (e.g. a percentage discount and a flat fee) through it, and keep the existing code working. There is no test spec — make the design sound and verify it runs.",
     "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
     "verify": "python -m pytest -q",
+    "expectChange": true,
     "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/protocol mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
     "note": "AMBIGUOUS-HARD (staff+): no spec — agentj designs the abstraction. LLM-judge graded on design + verify the baseline stays green."
   },
@@ -140,6 +142,7 @@
     },
     "expect": ["250", "WIDGET-9"],
     "expectNoChange": true,
+    "budgetTokensIn": 120000,
     "timeoutSec": 600,
     "note": "Investigation (distributed): correlate three services' JSON logs by time/ids + the gateway's timeout config. Root cause: 250ms upstream timeout + non-idempotent retry => duplicate orders/reservations."
   },
@@ -153,6 +156,7 @@
     "seed": "cp _seeds/release-bug.inventory.ts services/inventory.ts",
     "verify": "bun test e2e",
     "solution": "cp _seeds/solutions/dist-debug/services/inventory.ts services/inventory.ts",
+    "budgetTokensIn": 80000,
     "timeoutSec": 900,
     "note": "Full[Distributed debug]: the release request crosses two service boundaries and dies on a silent key mismatch (handler logs success either way). Finding it requires tracing the reservationId hand-off across services."
   },
@@ -166,6 +170,7 @@
     "seed": "cp _seeds/tracing.test.ts e2e/tracing.test.ts",
     "verify": "bun test e2e",
     "solution": "cp -R _seeds/solutions/dist-tracing/services/. services/",
+    "budgetTokensIn": 150000,
     "timeoutSec": 900,
     "note": "Full[Distributed tracing]: a cross-cutting feature touching all three services + the shared client; the spec asserts on each service's /__logs debug endpoint."
   },
@@ -179,6 +184,7 @@
     "seed": "cp _seeds/idempotency.test.ts e2e/idempotency.test.ts",
     "verify": "bun test e2e",
     "solution": "cp -R _seeds/solutions/dist-feature/services/. services/",
+    "budgetTokensIn": 150000,
     "timeoutSec": 900,
     "note": "Full[Distributed feature]: cross-service state semantics (gateway header plumbing + an idempotency store in orders) motivated by the incident the investigation task diagnoses."
   },
@@ -206,6 +212,7 @@
     "seed": "cp _seeds/race.payments.ts services/payments.ts",
     "verify": "bun test e2e/holds.test.ts && bun test e2e/holds.test.ts && bun test e2e/holds.test.ts",
     "solution": "cp _seeds/solutions/cloud-debug/services/payments.ts services/payments.ts",
+    "budgetTokensIn": 150000,
     "timeoutSec": 900,
     "note": "HARD debug: a TOCTOU race across an await boundary — the dedup check passes for both in-flight requests because the hold is recorded only after the awaited PSP call. The sequential-dup test passing makes the guard LOOK correct. Verify runs the suite 3x to reject flaky non-fixes."
   },
@@ -219,6 +226,7 @@
     "verify": "bun test e2e",
     "expect": ["d-9182"],
     "solution": "cp _seeds/solutions/cloud-capstone/services/payments.ts services/payments.ts",
+    "budgetTokensIn": 200000,
     "timeoutSec": 1200,
     "note": "HARD capstone: diagnose-then-fix. The committed fixture ships the regressed pool (4); the failing load test reproduces INC-407. Graded on BOTH the suite going green and the report citing deploy d-9182 — evidence-guided repair, not just turning a knob until tests pass."
   },
@@ -246,6 +254,7 @@
     "seed": "cp _seeds/flaky.test.ts e2e/flaky.test.ts",
     "verify": "test -z \"$(git diff $(git rev-list --max-parents=0 HEAD) -- lib/psp-sim.ts)\" && bun test e2e/flaky.test.ts && bun test e2e/holds.test.ts && bun test e2e/flaky.test.ts",
     "solution": "cp _seeds/solutions/cloud-flaky/services/payments.ts services/payments.ts",
+    "budgetTokensIn": 200000,
     "timeoutSec": 900,
     "note": "HARD fault-tolerance: the failure is in VENDOR code that must not be touched — the fix is bounded retry on the caller's side. verify asserts the vendor file is byte-identical to the fixture, runs flaky 2x, and re-runs holds to catch retry implementations that break hold dedup."
   },
@@ -313,6 +322,7 @@
     "prompt": "The store package applies money adjustments (a discount here, an order limit there) ad-hoc, and the team keeps needing new ones — taxes, shipping fees, loyalty credits. Design and implement an EXTENSIBLE pricing pipeline: a clean way to define pricing rules that transform a cart's running total in an explicit order, so adding a new rule type is easy and the order of application is clear. Decide the abstraction yourself (an interface fits Go well), wire at least two concrete rules (e.g. a percentage discount and a flat fee) through it, and keep the existing code working. There is no test spec — make the design sound and verify it builds.",
     "needs": ["go"],
     "verify": "go test ./...",
+    "expectChange": true,
     "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/interface mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
     "note": "AMBIGUOUS-HARD (staff+): no spec — agentj designs the abstraction (a Go interface). LLM-judge graded on design + verify the baseline stays green."
   }

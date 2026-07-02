@@ -10,7 +10,6 @@
 use crate::config::Config;
 use crate::events::AgentEvent;
 use crate::provider::{ChatMessage, Llm};
-use crate::subagent::subagent_prompt;
 use crate::tools::{tool_specs, Tools};
 use crate::util::first_line;
 use async_recursion::async_recursion;
@@ -93,6 +92,9 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
         "delegating {} sub-task(s) in parallel",
         tasks.len()
     )));
+    // Every subagent shares one seeded system prompt: identity + cwd + the repo's AGENTS.md, so it
+    // starts oriented instead of re-deriving the project from scratch.
+    let sub_system = crate::prompt::subagent_system_prompt(&sess.tools.root.to_string_lossy());
     let sem = Arc::new(Semaphore::new(sess.cfg.max_parallel_subagents));
     let mut set: JoinSet<SubResult> = JoinSet::new();
     let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::new();
@@ -101,6 +103,7 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
         let sess = sess.clone();
         let parent = tx.clone();
         let sem = sem.clone();
+        let sub_system = sub_system.clone();
         let handle = set.spawn(async move {
             let _permit = sem.acquire_owned().await;
             let _ = parent.send(AgentEvent::SubagentStart { id: i, desc: label });
@@ -110,7 +113,7 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
                 None => task,
             };
             let mut sub_msgs = vec![
-                ChatMessage::system(subagent_prompt()),
+                ChatMessage::system(sub_system),
                 ChatMessage::user(prompt),
             ];
             let (atx, mut arx) = unbounded_channel::<AgentEvent>();
