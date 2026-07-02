@@ -15,6 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+use tachyonfx::{fx, Effect, Interpolation};
 use tokio::task::AbortHandle;
 
 const EFFECT_TTL: Duration = Duration::from_millis(700);
@@ -130,6 +131,10 @@ pub struct App {
     turn_saw_error: bool,
     // live subagents (delegate batch), keyed by index for stable ordering
     pub subagents: BTreeMap<usize, SubagentRow>,
+    /// A brief coalesce effect over the tray when a batch spins up (tachyonfx).
+    pub tray_fx: Option<Effect>,
+    /// Previous frame time, for effect delta timing (owned by `view::draw`).
+    pub last_draw: Option<Instant>,
     // session status meter
     pub session_start: Instant,
     pub last_usage: Option<TokenUsage>,
@@ -179,6 +184,8 @@ impl App {
             pending_snapshot: false,
             turn_saw_error: false,
             subagents: BTreeMap::new(),
+            tray_fx: None,
+            last_draw: None,
             session_start: Instant::now(),
             last_usage: None,
             context_window,
@@ -207,6 +214,7 @@ impl App {
     /// transcript (still-running rows just vanish — their turn was aborted). Called when a delegate
     /// batch completes, and on turn end/abort as a safety net.
     fn flush_subagent_summaries(&mut self) {
+        self.tray_fx = None;
         for (id, row) in std::mem::take(&mut self.subagents) {
             let Some(ok) = row.done else { continue };
             let (glyph, style) = if ok {
@@ -642,6 +650,10 @@ impl App {
             }
             AgentEvent::SubagentStart { id, desc } => {
                 let now = Instant::now();
+                if self.subagents.is_empty() {
+                    // The tray materializes: cells coalesce into place over ~a quarter second.
+                    self.tray_fx = Some(fx::coalesce((250, Interpolation::SineOut)));
+                }
                 self.subagents.insert(
                     id,
                     SubagentRow {

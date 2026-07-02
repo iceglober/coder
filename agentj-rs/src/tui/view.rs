@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 use std::time::{Duration, Instant};
+use tachyonfx::EffectRenderer;
 
 pub const MAX_INPUT_ROWS: u16 = 8;
 
@@ -620,6 +621,14 @@ fn popover_lines(app: &App) -> Vec<Line<'static>> {
 
 /// Render one frame from the current `App` state.
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // Frame delta for effects, capped so a long gap between frames doesn't skip an animation.
+    let now = Instant::now();
+    let frame_dt = app
+        .last_draw
+        .map(|t| now.duration_since(t).min(Duration::from_millis(250)))
+        .unwrap_or_default();
+    app.last_draw = Some(now);
+
     let area = f.area();
     let in_h = app.input_cache.rows;
     let panel_h = subagent_panel_rows(app.subagents.len());
@@ -656,12 +665,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         rows[0],
     );
 
-    // Live subagent panel (only present while a delegate batch runs).
+    // Live subagent panel (only present while a delegate batch runs). A fresh batch coalesces into
+    // place; the effect rides the running-turn ticker, so idle frames never animate.
     if panel_h > 0 {
         f.render_widget(
             Paragraph::new(subagent_panel(app, Instant::now(), rows[1].width)),
             rows[1],
         );
+        if let Some(fx_) = app.tray_fx.as_mut() {
+            f.render_effect(fx_, rows[1], frame_dt.into());
+            if fx_.done() {
+                app.tray_fx = None;
+            }
+        }
+    } else {
+        app.tray_fx = None;
     }
 
     // Status line (left status + right-aligned session segment).
@@ -988,7 +1006,12 @@ mod tests {
 
         let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
         app.refresh_input(80);
+        // Two frames: the tray coalesce effect starts fully dissolved on frame one; after its
+        // duration elapses the rows must be fully material again.
         term.draw(|f| draw(f, &mut app)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(app.tray_fx.is_none(), "coalesce effect must finish and clear");
         let rendered: String = term
             .backend()
             .buffer()
