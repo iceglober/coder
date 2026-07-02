@@ -53,10 +53,7 @@ try {
   if (errors.length) problems.push(`console/page errors: ${errors.join("; ")}`);
   if (tip !== "$9.00") problems.push(`tip is ${JSON.stringify(tip)}, expected "$9.00"`);
   if (total !== "$59.00") problems.push(`total is ${JSON.stringify(total)}, expected "$59.00"`);
-  if (problems.length) {
-    console.error(`frontend-tip-check: FAIL — ${problems.join(" · ")}`);
-    process.exit(1);
-  }
+  if (problems.length) fail(`FAIL — ${problems.join(" · ")}`);
   console.log("frontend-tip-check: OK — tip $9.00, total $59.00, no errors");
   process.exit(0);
 } catch (e) {

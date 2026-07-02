@@ -110,6 +110,7 @@ impl Config {
     ) -> Self {
         let env_num = |k: &str| get(k).and_then(|s| s.parse::<u64>().ok());
         let num = |k: &str, file_value: Option<u64>| env_num(k).or(file_value);
+        let context_window = env_num("AGENTJ_CONTEXT_WINDOW").or_else(|| crate::model::context_window(model_id));
         Config {
             max_steps: num("AGENTJ_MAX_STEPS", file.max_steps)
                 .filter(|n| *n >= 1)
@@ -119,15 +120,13 @@ impl Config {
             max_parallel_subagents: env_num("AGENTJ_MAX_PARALLEL_SUBAGENTS")
                 .filter(|n| *n >= 1)
                 .unwrap_or(4) as usize,
-            context_window: env_num("AGENTJ_CONTEXT_WINDOW")
-                .or_else(|| crate::model::context_window(model_id)),
-            compact_threshold: {
-                let base = env_num("AGENTJ_COMPACT_THRESHOLD").filter(|n| *n >= 1000).unwrap_or(12_000);
-                match env_num("AGENTJ_CONTEXT_WINDOW").or_else(|| crate::model::context_window(model_id)) {
-                    Some(w) => base.min(w * 7 / 10),
-                    None => base,
-                }
-            },
+            context_window,
+            // Absolute (not window-relative) so it fires on big-window models; clamp below 70% of the
+            // window when one is known so a small-window model never compacts too late.
+            compact_threshold: env_num("AGENTJ_COMPACT_THRESHOLD")
+                .filter(|n| *n >= 1000)
+                .unwrap_or(12_000)
+                .min(context_window.map_or(u64::MAX, |w| w * 7 / 10)),
             check: get("AGENTJ_CHECK").filter(|s| !s.is_empty()).or(file.check),
         }
     }
