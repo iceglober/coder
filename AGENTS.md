@@ -1,67 +1,78 @@
 # AGENTS.md — agentj
 
-Guidance for agents (and humans) working in this repo.
+## What this repo is
+- Product: `agentj-rs/` — Rust terminal coding agent with a ratatui TUI and headless `--once` mode.
+- Root layer: thin Bun/bash wrappers for build/test/eval convenience; not a separate app.
+- Eval harness: `test-projects/` — fixed fixture projects and task runner used to grade agent behavior.
+- Historical notes: `docs/` — prior-architecture/design documents, not current build inputs.
 
-## What this is
+## Component map
+- `agentj-rs/`
+  - Rust crate and only shipped product binary (`agentj-rs/Cargo.toml`, `agentj-rs/src/main.rs`).
+  - Key areas:
+    - `src/main.rs` — CLI entry; routes to TUI, `--once`, or `mcp` subcommands.
+    - `src/agent.rs` — model/tool loop; delegate interception; background-job nudges.
+    - `src/tools.rs` — built-in tools, `job_*`, MCP tool routing, repo path confinement.
+    - `src/tui/` — full-screen UI (`app.rs`, `view.rs`, `editor.rs`, `keymap.rs`, `markdown.rs`, `knowledge.rs`, `theme.rs`, `mod.rs`).
+    - `src/provider/`, `src/model.rs` — provider abstraction and OpenAI-compatible client; Azure/custom wired.
+    - `src/mcp/` — `.mcp.json` loading/merge and RMCP client.
+    - `src/rekey.rs` — `/task` worktree re-key flow.
+    - `tests/pty_input.rs` — PTY integration tests.
+- `bin/`
+  - `bin/agentj` — symlink-safe bash launcher; builds `agentj-rs/target/release/agentj` on first run.
+  - `bin/aj` — short alias to `bin/agentj`.
+- `test-projects/`
+  - `run.ts` — Bun eval runner.
+  - `tasks.jsonc` — task manifest and grading config.
+  - Fixtures:
+    - `pnpm-vitest-monorepo/` — pnpm workspace fixture.
+    - `python-pytest/` — Python/pytest fixture.
+    - `go-stdlib/` — Go/std testing fixture.
+- `package.json`
+  - Convenience scripts only: `agentj`, `build`, `test`, `eval`.
+- `README.md`
+  - User-facing overview and run/develop commands.
 
-`agentj` is a simple, self-contained terminal coding agent — same category as Claude Code / Opencode.
-The product is a **Rust crate with a full-screen ratatui UI**, in `agentj-rs/`. It reads/writes files,
-runs commands, and calls a model in a loop until the task is done. Guiding principle: **make it work
-and keep it small.** (An earlier TypeScript implementation was retired in the Rust cutover; historical
-design notes live in `docs/`.)
+## How the pieces fit together
+- `bin/agentj` launches the Rust binary; if missing, it runs `cargo build --release --manifest-path agentj-rs/Cargo.toml` first.
+- Root `package.json` mirrors the same build/test/eval commands for Bun users.
+- `test-projects/run.ts` copies a fixture to a temp dir, initializes git, runs setup, runs `agentj --once`, then grades with `verify`, `expect`, and/or `expectNoChange` against the baseline commit.
+- `docs/` is reference material only; current behavior is defined by the Rust crate and runner code above.
 
-## How it fits together (`agentj-rs/src/`)
+## Agent conventions for this repo
+- Work in the real product unless the task is explicitly about the wrapper layer or eval fixtures: `agentj-rs/` is the app.
+- Keep changes small and local; do not revive the removed TypeScript product.
+- Match existing module boundaries in `agentj-rs/src/`:
+  - async/event-loop orchestration in `tui/mod.rs`
+  - UI state transitions in `tui/app.rs`
+  - rendering in `tui/view.rs`
+  - tool definitions in `tools.rs`
+- Preserve repo confinement and process-group behavior when changing tools/command execution (`src/tools.rs`, `src/exec.rs`, `src/jobs.rs`).
+- Treat `docs/` as historical unless a task explicitly asks to update design notes.
+- For eval work, document and preserve objective graders in `test-projects/tasks.jsonc`; do not replace strict checks with prose.
 
-- `main.rs` — CLI entry: flags, the `mcp` subcommand, then `--once` (headless) or the ratatui chat.
-  Builds `agent::Session` (llm + tools + `config::Config`) once and threads it through.
-- `tui/` — the interactive full-screen UI, split by concern: `app.rs` (the `App` state struct and its
-  keystroke/event transitions, which return an `AppEffect` for anything the loop must `.await`),
-  `view.rs` (rendering: transcript / subagent panel / status / input, plus the row-count caches),
-  `markdown.rs` (CommonMark → styled lines for assistant replies), `editor.rs` (multi-line input
-  buffer), `keymap.rs` (pure keystroke → `Action`), `theme.rs` (palette), `knowledge.rs` (the
-  `/init` + `/knowledge` doc workflow: FNV hash snapshot of tracked files in `.aj/knowledge.json`,
-  Rust-computed change diffs, and the directive prompts that drive the orchestrated doc turns), and
-  `mod.rs` (the `tokio::select!` event loop + `spawn_turn`).
-- `config.rs` — runtime knobs resolved once from the environment (`Config`).
-- `agent.rs` — the model loop (`run_turn`). Non-streaming: call the model, run its tool calls, repeat.
-  Layered on: **background-job nudging** (drain finished/timeout nudges each iteration; idle-wait only
-  when there's nothing else to do), **`delegate`** interception (subagents), and **history-commit
-  deltas** — as the turn progresses it emits committed message groups (an assistant reply plus its
-  tool replies, atomically) so an interrupted turn keeps whatever already applied.
-- `subagent.rs` — the subagent prompt; `delegate` runs sub-tasks in parallel via a `JoinSet` (bounded),
-  depth cap 1, emitting structured `Subagent{Start,Progress,End}` events (a panicked sub-task still
-  reports a failed end); only results re-enter the parent context.
-- `jobs.rs` — `JobManager`: background commands in their own process group, capped output buffers,
-  finish/timeout nudges (a `VecDeque` + `Notify`, never locked across `.await`), an atomic
-  `has_running`, and `kill_after(watermark)` so an interrupt kills only that turn's jobs.
-- `tools.rs` — built-in tools (`read_file`/`write_file`/`edit_file`/`list_dir`/`glob`/`grep`/`bash`),
-  the `job_*` tools, MCP routing, and `tool_specs`. `Tools::call` returns a `ToolOutcome { text, ok }`:
-  the model still only ever sees `text` (tools never error out of a call), while `ok` lets the UI mark
-  failed calls without re-sniffing the string.
-- `exec.rs` — the command runner: detached process group so Ctrl-C/timeout kills the whole tree.
-- `model.rs` — provider resolution + preflight (azure/custom wired; vertex/anthropic staged), plus a
-  `context_window` model table for the UI meter.
-- `provider/` — the `Llm` enum + the OpenAI-compatible client; captures `usage` (`TokenUsage`) per call.
-- `mcp/` — `.mcp.json` config (`config.rs`, pure + tested) + an `rmcp` client (`client.rs`).
-- `prompt.rs` — the SPEAR system prompt. `rekey.rs` — `/task` LRW logic. `util.rs` — shared helpers.
-  `commands.rs` / `events.rs`.
+## Verified commands
+Ran from repo root:
+```sh
+cargo build --release --manifest-path agentj-rs/Cargo.toml
+cargo test --manifest-path agentj-rs/Cargo.toml
+bun test-projects/run.ts --help
+```
 
-## Conventions
+Convenience equivalents defined in `package.json`:
+```sh
+bun run build
+bun run test
+bun run eval
+```
 
-- **Self-contained; no runtime dep on `glrs`.** Reimplement small patterns clean, never import.
-- **Non-streaming loop on purpose** (Vertex mangles Gemini thought-signatures on streamed tool replay).
-- **Permissions are auto** — every tool call proceeds; the user owns git as the safety net.
-- **Path confinement** — file tools resolve through `safe_resolve`, rejecting `..`/symlink escapes.
-- **Tools never error out** — `Tools::call` returns `ToolOutcome { text, ok }`; the model reads only
-  `text` (a failure is a string it can react to), and `ok` is set at the source, not sniffed from it.
-- **Branch-first (SPEAR Scope)** — get on the intended branch/PR before changing anything; if you
-  can't, STOP and report, never edit the wrong branch.
+Direct launchers:
+```sh
+bin/agentj
+bin/aj
+```
 
-## Repo conventions
-
-- The product builds with `cargo` (edition 2021). `bin/agentj` / `bin/aj` are bash launchers that build
-  the release binary on first run, then exec it.
-- `cargo build --release --manifest-path agentj-rs/Cargo.toml` (or `bun run build`);
-  `cargo test --manifest-path agentj-rs/Cargo.toml` (or `bun run test`). Keep the build **warning-clean**.
-- `test-projects/` is a bun eval harness (`bun test-projects/run.ts`). It drives `bin/agentj --once`.
-- Keep additions small and justified — the agent should stay simple enough to reason about in one sitting.
+## Verification evidence
+- `cargo build --release --manifest-path agentj-rs/Cargo.toml` — passed.
+- `cargo test --manifest-path agentj-rs/Cargo.toml` — passed: 94 unit tests + 5 PTY integration tests.
+- `bun test-projects/run.ts --help` — exits 0 and prints the harness summary banner.
