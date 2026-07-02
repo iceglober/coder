@@ -19,6 +19,7 @@ import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gradeJudge } from "./judge.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENTJ = join(HERE, "..", "bin", "agentj");
@@ -240,8 +241,19 @@ for (let rep = 1; rep <= (selftest ? 1 : repeat); rep++) {
     if (t.expectNoChange && changedFiles.length) fails.push(`expected read-only, but changed: ${changedFiles.join(", ")}`);
     if (t.expectChange && !changedFiles.length) fails.push("expected source changes, but the diff is empty — the task was not attempted");
     if (t.judge) {
-      // LLM judge disabled during the Rust cutover — grade architect tasks on `verify` only for now.
-      console.log("    judge: skipped (LLM judge pending the Rust port; grading on verify only)");
+      const diff = (await $`git diff --cached ${base} -- ${"."} ${EXCLUDE}`.cwd(cwd).quiet()).stdout.toString();
+      try {
+        const verdict = await gradeJudge(t.judge, diff, out);
+        if (!verdict) {
+          console.log("    judge: skipped (no model creds — set AZURE_BASE_URL/AZURE_API_KEY/AGENTJ_MODEL)");
+        } else {
+          console.log(`    judge: ${verdict.pass ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"} — ${verdict.reason}`);
+          if (!verdict.pass) fails.push(`judge: ${verdict.reason}`);
+        }
+      } catch (e) {
+        // Grading-infra failure (network/parse) must not be scored as a task failure.
+        console.log(`    judge: \x1b[33mERROR\x1b[0m (${e}) — not counted`);
+      }
     }
 
     const pass = fails.length === 0;
