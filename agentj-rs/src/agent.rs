@@ -242,9 +242,11 @@ fn is_check_command(cmd: &str, configured: Option<&str>) -> bool {
             return true;
         }
     }
-    const HINTS: [&str; 12] = [
+    const HINTS: [&str; 17] = [
         "cargo test", "cargo check", "cargo clippy", "pytest", "go test", "bun test", "npm test",
         "pnpm test", "pnpm -r test", "vitest", "make test", "make check",
+        // end-to-end / browser runners — how frontend work is actually verified
+        "playwright", "cypress", "test:e2e", "run e2e", "webdriver",
     ];
     HINTS.iter().any(|h| cmd.contains(h))
 }
@@ -529,6 +531,8 @@ pub async fn run_turn(
             if !is_delegate {
                 match tc.function.name.as_str() {
                     "write_file" | "edit_file" if ok => edited_since_check = true,
+                    // A passing web_check IS frontend verification — it clears the ASSESS gate.
+                    "web_check" if ok => edited_since_check = false,
                     "bash" => {
                         if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
                             if is_check_command(cmd, sess.cfg.check.as_deref()) && text.contains("[exit 0]") {
@@ -1013,6 +1017,29 @@ mod tests {
         assert!(!is_check_command("echo hello", None));
         assert!(is_check_command("echo hello", Some("echo hello")));
         assert!(is_check_command("bash -lc 'make verify'", Some("make verify")));
+        // end-to-end / browser runners count as checks
+        assert!(is_check_command("bunx playwright test", None));
+        assert!(is_check_command("npm run test:e2e", None));
+        assert!(is_check_command("yarn cypress run", None));
+    }
+
+    #[tokio::test]
+    async fn a_failed_web_check_does_not_clear_the_assess_gate() {
+        // web_check is treated as frontend verification, but only a PASSING one clears the gate.
+        let dir = temp_root("webcheck-gate");
+        let sess = session_in(
+            dir.to_str().unwrap(),
+            vec![
+                ScriptStep::Turn(turn_tool("write_file", serde_json::json!({ "path": "app.js", "content": "x" }))),
+                ScriptStep::Turn(turn_tool("web_check", serde_json::json!({ "url": "http://localhost:1" }))),
+                ScriptStep::Turn(turn_text("verified in the browser")),
+            ],
+            None,
+        );
+        // web_check will report ok=false here (nothing served), so it should NOT clear the gate —
+        // an unverified edit remains, and the nudge fires. This proves ok-gating, not just presence.
+        let events = run_and_collect(&sess).await;
+        assert_eq!(notes_containing(&events, "ASSESS check"), 1, "{events:?}");
     }
 
     fn spear_notes(events: &[AgentEvent]) -> usize {

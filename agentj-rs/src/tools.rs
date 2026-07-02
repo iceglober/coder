@@ -22,13 +22,13 @@ pub struct ToolOutcome {
 }
 
 impl ToolOutcome {
-    fn ok(text: impl Into<String>) -> Self {
+    pub(crate) fn ok(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             ok: true,
         }
     }
-    fn err(text: impl Into<String>) -> Self {
+    pub(crate) fn err(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             ok: false,
@@ -115,6 +115,7 @@ impl Tools {
             "glob" => self.glob(args).await,
             "grep" => self.grep(args).await,
             "bash" => self.bash(args).await,
+            "web_check" => crate::webcheck::web_check(&self.root, args).await,
             "job_start" => self.job_start(args).await,
             "job_check" => ToolOutcome::ok(
                 self.jobs
@@ -522,6 +523,17 @@ pub fn tool_specs(allow_delegate: bool) -> Vec<ToolSpec> {
             name: "bash".into(),
             description: "Run a shell command from the repo root (bash -lc). Use for builds, tests, git, etc. Output truncated; bounded to 120s by default, or `timeout_s` (1..=600) if given.".into(),
             parameters: json!({ "type": "object", "properties": { "command": { "type": "string" }, "timeout_s": { "type": "number", "description": "kill the command after this many seconds (clamped to 1..=600; default 120)" } }, "required": ["command"] }),
+        },
+        ToolSpec {
+            name: "web_check".into(),
+            description: "Verify a running web page in a real headless browser (you cannot see it otherwise). Loads `url` and reports what's invisible from the source: uncaught exceptions, console.error output, failed network requests (>=400), and — if given — whether `expect_text` appears or `expect_selector` exists. Use this to check FRONTEND/UI work after starting the dev server (job_start), the way you'd run tests for backend work. ok=false on any error or failed assertion. Needs `bun` + Playwright + a Chrome/Chromium.".into(),
+            parameters: json!({ "type": "object", "properties": {
+                "url": { "type": "string", "description": "page to load, e.g. http://localhost:5173" },
+                "wait_for": { "type": "string", "description": "optional CSS selector to wait for before checking" },
+                "expect_text": { "type": "string", "description": "optional: assert this text is visible on the page" },
+                "expect_selector": { "type": "string", "description": "optional: assert an element matching this CSS selector exists" },
+                "timeout_s": { "type": "number", "description": "navigation timeout seconds (default 15)" }
+            }, "required": ["url"] }),
         },
         ToolSpec {
             name: "job_start".into(),

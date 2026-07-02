@@ -16,6 +16,7 @@ mod subagent;
 mod tools;
 mod tui;
 mod util;
+mod webcheck;
 
 use events::AgentEvent;
 use model::{preflight, resolve_model, resolve_provider, Provider, Selector};
