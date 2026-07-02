@@ -12,6 +12,8 @@ bun test-projects/run.ts dist          # only tasks whose id contains "dist"
 bun test-projects/run.ts --selftest    # NO agent, no creds: prove every Full task's graders FAIL on
                                        # the unsolved fixture and PASS on its reference `solution`
 KEEP=1 bun test-projects/run.ts ts     # keep the throwaway dir to inspect the diff
+bun test-projects/run.ts --prompt detailed   # pick a prompt variant (default: first listed = terse)
+bun test-projects/run.ts --all-prompts       # run every variant of every task (id@variant rows)
 ```
 
 Live runs need provider creds in the env — with the wired Azure/OpenAI-compatible path:
