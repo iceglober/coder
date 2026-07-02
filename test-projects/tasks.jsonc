@@ -92,6 +92,7 @@
     "seed": "cp _seeds/money_bug.py money.py",
     "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
     "verify": "python -m pytest -q",
+    "solution": "cp _seeds/solutions/py-full-simple/money.py money.py",
     "note": "Full[Simple]: isolated one-file bug fix; single-test iteration (pytest -k)."
   },
   {
@@ -101,6 +102,7 @@
     "seed": "cp _seeds/test_discount.py test_discount.py",
     "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
     "verify": "python -m pytest -q",
+    "solution": "cp _seeds/solutions/py-full-moderate/discount.py discount.py",
     "note": "Full[Moderate] — mid-level barely: discount engine with order-dependent stacking, 0 floor, percent clamp, cent rounding, cart wiring."
   },
   {
@@ -110,6 +112,7 @@
     "seed": "cp _seeds/test_money_currency.py test_money_currency.py && cp _seeds/test_cart_currency.py test_cart.py",
     "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
     "verify": "python -m pytest -q",
+    "solution": "cp _seeds/solutions/py-full-advanced/money.py money.py && cp _seeds/solutions/py-full-advanced/cart.py cart.py",
     "note": "Full[Advanced] — staff+: introduce currency as first-class (Money + currency guards) and migrate money + cart while preserving format_usd."
   },
   {
@@ -312,6 +315,7 @@
     "seed": "cp _seeds/money_bug.go store/money.go",
     "needs": ["go"],
     "verify": "go test ./...",
+    "solution": "cp _seeds/solutions/go-full-simple/money.go store/money.go",
     "note": "Full[Simple]: isolated one-file bug fix; package-scoped single-test iteration (go test -run)."
   },
   {
@@ -321,6 +325,7 @@
     "seed": "cp _seeds/discount_test.go store/discount_test.go",
     "needs": ["go"],
     "verify": "go test ./...",
+    "solution": "cp _seeds/solutions/go-full-moderate/discount.go store/discount.go",
     "note": "Full[Moderate] — mid-level barely: discount engine with order-dependent stacking, 0 floor, percent clamp, cent rounding, cart wiring."
   },
   {
@@ -330,6 +335,7 @@
     "seed": "cp _seeds/money_currency_test.go store/money_currency_test.go && cp _seeds/cart_currency_test.go store/cart_test.go",
     "needs": ["go"],
     "verify": "go test ./...",
+    "solution": "cp _seeds/solutions/go-full-advanced/money.go store/money.go && cp _seeds/solutions/go-full-advanced/cart.go store/cart.go",
     "note": "Full[Advanced] — staff+: introduce currency as first-class (Money + currency guards via Go error returns) and migrate money + cart while preserving FormatUSD."
   },
   {

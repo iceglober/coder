@@ -68,3 +68,23 @@ editing the tests to match.
 
 Keep `verify` strict and objective (a passing suite, a specific assertion) — the harness is only as
 honest as its checks.
+
+## Reliability (not just pass/fail)
+
+Single runs lie. `bun test-projects/report.ts` aggregates `results/history.jsonl` into a per-task
+table — pass-rate and median/min/max of wall-clock and input tokens across runs — dropping rows that
+never reached the model. Build the baseline with `--repeat`:
+
+```bash
+bun test-projects/run.ts cloud-debug --repeat 9    # collect runs
+bun test-projects/report.ts                        # see spread
+```
+
+Measured baseline (gpt-5.4): every task is 100% CORRECT across repeats, but the hardest terse
+investigation/debug tasks have a bimodal TOKEN distribution — a ~15-20% tail that spends 2-3x the
+median (e.g. cloud-debug median 122k, tail to 325k) and trips its `budgetTokensIn` grader. On
+gpt-5.4-class models the discriminating axis is efficiency/reliability, not correctness.
+
+`--selftest` covers the go and python Full tasks (reference solutions under `_seeds/solutions/`); the
+js Full tasks need `pnpm`, so they SKIP locally and in the current CI job (which has only bun) — add
+node/pnpm/python/go to `.github/workflows/ci.yml` to cover every language.
