@@ -94,7 +94,10 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
     )));
     // Every subagent shares one seeded system prompt: identity + cwd + the repo's AGENTS.md, so it
     // starts oriented instead of re-deriving the project from scratch.
-    let sub_system = crate::prompt::subagent_system_prompt(&sess.tools.root.to_string_lossy());
+    let sub_system = crate::prompt::subagent_system_prompt(
+        &sess.tools.root.to_string_lossy(),
+        sess.cfg.check.as_deref(),
+    );
     let sem = Arc::new(Semaphore::new(sess.cfg.max_parallel_subagents));
     let mut set: JoinSet<SubResult> = JoinSet::new();
     let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::new();
@@ -202,6 +205,53 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
     (joined, all_ok)
 }
 
+/// True when a bash command looks like it runs the project's checks. The configured `check` command
+/// wins; otherwise a conservative list of common test/build invocations.
+fn is_check_command(cmd: &str, configured: Option<&str>) -> bool {
+    if let Some(c) = configured {
+        let c = c.trim();
+        if !c.is_empty() && cmd.contains(c) {
+            return true;
+        }
+    }
+    const HINTS: [&str; 12] = [
+        "cargo test", "cargo check", "cargo clippy", "pytest", "go test", "bun test", "npm test",
+        "pnpm test", "pnpm -r test", "vitest", "make test", "make check",
+    ];
+    HINTS.iter().any(|h| cmd.contains(h))
+}
+
+/// Once the context is past the compaction threshold, elide the BODIES of older tool results —
+/// the last `keep_recent` stay intact, and the messages themselves remain (the OpenAI wire format
+/// requires a tool reply per tool_call id). Returns how many results were elided.
+fn compact_history(messages: &mut [ChatMessage], keep_recent: usize) -> usize {
+    let tool_idxs: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "tool")
+        .map(|(i, _)| i)
+        .collect();
+    if tool_idxs.len() <= keep_recent {
+        return 0;
+    }
+    let mut elided = 0;
+    for &i in &tool_idxs[..tool_idxs.len() - keep_recent] {
+        if let Some(c) = &messages[i].content {
+            if c.len() > 200 && !c.starts_with("[elided") {
+                messages[i].content = Some(format!(
+                    "[elided older tool result ({} chars) — re-run the tool if you need it again]",
+                    c.len()
+                ));
+                elided += 1;
+            }
+        }
+    }
+    elided
+}
+
+/// Tool results older than this many stay verbatim during compaction.
+const COMPACT_KEEP_RECENT: usize = 8;
+
 /// Run one turn. `messages` already includes the system prompt, prior history, and the new user turn.
 /// Events stream to `tx`. When `commit` is set, each newly appended message (or tool-call group) is
 /// also sent through it as a delta, so the UI can fold completed steps into its history as the turn
@@ -227,6 +277,11 @@ pub async fn run_turn(
     let mut direct_calls = 0usize; // non-delegate tool calls this turn
     let mut used_delegate = false;
     let mut spear_nudged = false;
+    let mut edited_since_check = false; // a write/edit landed with no passing check after it
+    let mut assess_nudged = false;
+    let mut committed_this_turn = false;
+    let mut commit_nudged = false;
+    let mut last_prompt_tokens: u64 = 0;
 
     for _ in 0..sess.cfg.max_steps {
         // Background jobs are the primary loop's concern only (subagents don't consume nudges).
@@ -236,6 +291,19 @@ pub async fn run_turn(
                 let m = ChatMessage::user(n);
                 commit_delta(vec![m.clone()]);
                 messages.push(m);
+            }
+        }
+
+        // Context compaction: past ~70% of the window, elide older tool-result bodies so long tasks
+        // don't hit the wall. The durable (TUI) history keeps full text; this trims the working copy.
+        if let Some(window) = sess.cfg.context_window {
+            if last_prompt_tokens > window * 7 / 10 {
+                let n = compact_history(messages, COMPACT_KEEP_RECENT);
+                if n > 0 {
+                    let _ = tx.send(AgentEvent::Note(format!(
+                        "context compacted — elided {n} older tool results"
+                    )));
+                }
             }
         }
 
@@ -264,6 +332,7 @@ pub async fn run_turn(
         };
 
         if let Some(usage) = turn.usage {
+            last_prompt_tokens = usage.prompt_tokens;
             let _ = tx.send(AgentEvent::Usage(usage));
         }
         if turn.finish_reason == "length" {
@@ -289,6 +358,52 @@ pub async fn run_turn(
         if turn.tool_calls.is_empty() {
             // A bare assistant reply commits on its own.
             commit_delta(vec![assistant]);
+
+            // ASSESS gate: edits landed but no project check has PASSED since the last one — one
+            // supervisor nudge before the turn may end. The agent verifies without being asked.
+            if edited_since_check && !assess_nudged {
+                assess_nudged = true;
+                let hint = sess
+                    .cfg
+                    .check
+                    .as_deref()
+                    .map(|c| format!(" (`{c}`)"))
+                    .unwrap_or_default();
+                let msg = format!(
+                    "[supervisor: ASSESS check — you edited files this turn but no project check has \
+                     passed since the last edit. Run the project's checks{hint} and show the result \
+                     before finishing; if a check genuinely doesn't apply, say why in your final report.]"
+                );
+                let _ = tx.send(AgentEvent::Note(first_line(&msg, 120)));
+                let m = ChatMessage::user(msg);
+                commit_delta(vec![m.clone()]);
+                messages.push(m);
+                continue;
+            }
+
+            // RESOLVE gate (primary loop): a commit happened but the tree is still dirty — the
+            // half-shipped-change failure mode. One nudge listing the stragglers.
+            if allow_delegate && committed_this_turn && !commit_nudged {
+                commit_nudged = true;
+                let root = sess.tools.root.to_string_lossy().to_string();
+                if let Ok(o) = crate::exec::run(&["git", "status", "--porcelain"], &root, None).await {
+                    let dirty: Vec<&str> = o.stdout.lines().filter(|l| !l.is_empty()).take(15).collect();
+                    if o.exit_code == 0 && !dirty.is_empty() {
+                        let msg = format!(
+                            "[supervisor: RESOLVE check — you committed this turn, but the working tree \
+                             still has uncommitted changes:\n{}\nCommit what belongs with your change, \
+                             or explain in your final report why these are excluded.]",
+                            dirty.join("\n")
+                        );
+                        let _ = tx.send(AgentEvent::Note(first_line(&msg, 120)));
+                        let m = ChatMessage::user(msg);
+                        commit_delta(vec![m.clone()]);
+                        messages.push(m);
+                        continue;
+                    }
+                }
+            }
+
             // The model went idle. If background jobs are still running and it has nothing else to do,
             // wait for the next nudge and continue — it blocks only when there's nothing else to do.
             if allow_delegate
@@ -348,6 +463,28 @@ pub async fn run_turn(
                 elapsed_ms: start.elapsed().as_millis(),
                 summary: first_line(&text, 60),
             });
+            // Finishing-gate bookkeeping: edits arm the ASSESS gate; a passing check clears it; a
+            // git commit arms the RESOLVE completeness gate.
+            if !is_delegate {
+                match tc.function.name.as_str() {
+                    "write_file" | "edit_file" if ok => edited_since_check = true,
+                    "bash" => {
+                        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                            if is_check_command(cmd, sess.cfg.check.as_deref()) && text.contains("[exit 0]") {
+                                edited_since_check = false;
+                            }
+                            // `git -c user=… commit`, `git commit -m`, etc. — any git invocation
+                            // with a `commit` word arms the completeness gate.
+                            let is_commit = cmd.contains("git")
+                                && cmd.split_whitespace().any(|w| w == "commit");
+                            if is_commit && text.contains("[exit 0]") {
+                                committed_this_turn = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let tool_msg = ChatMessage {
                 role: "tool".into(),
                 content: Some(text),
@@ -396,6 +533,7 @@ mod tests {
             idle_wait: Duration::from_secs(120),
             max_parallel_subagents: 4,
             context_window: None,
+            check: None,
         }
     }
 
@@ -599,6 +737,157 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::SubagentStart { desc, .. } if desc == "Map the Rust crate")));
+    }
+
+    fn session_in(root: &str, steps: Vec<ScriptStep>, check: Option<&str>) -> Session {
+        let jobs = JobManager::new(root.to_string());
+        let tools = Tools::new(PathBuf::from(root), jobs, None);
+        let mut cfg = test_cfg();
+        cfg.check = check.map(String::from);
+        Session {
+            llm: Arc::new(Llm::Script(std::sync::Mutex::new(VecDeque::from(steps)))),
+            tools: Arc::new(tools),
+            cfg: Arc::new(cfg),
+        }
+    }
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentj-agent-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn notes_containing(events: &[AgentEvent], needle: &str) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Note(t) if t.contains(needle)))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn assess_gate_nudges_unverified_edits_once_then_lets_go() {
+        let dir = temp_root("assess");
+        let sess = session_in(
+            dir.to_str().unwrap(),
+            vec![
+                ScriptStep::Turn(turn_tool("write_file", serde_json::json!({ "path": "a.txt", "content": "x" }))),
+                ScriptStep::Turn(turn_text("all done")), // tries to finish without checking → nudged
+                ScriptStep::Turn(turn_tool("bash", serde_json::json!({ "command": "echo CHECK OK" }))),
+                ScriptStep::Turn(turn_text("done, checks pass")),
+            ],
+            Some("echo CHECK"),
+        );
+        let events = run_and_collect(&sess).await;
+        assert_eq!(notes_containing(&events, "ASSESS check"), 1, "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Done)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn assess_gate_stays_quiet_when_the_agent_already_verified() {
+        let dir = temp_root("assess-ok");
+        let sess = session_in(
+            dir.to_str().unwrap(),
+            vec![
+                ScriptStep::Turn(turn_tool("write_file", serde_json::json!({ "path": "a.txt", "content": "x" }))),
+                ScriptStep::Turn(turn_tool("bash", serde_json::json!({ "command": "echo CHECK OK" }))),
+                ScriptStep::Turn(turn_text("done, verified")),
+            ],
+            Some("echo CHECK"),
+        );
+        let events = run_and_collect(&sess).await;
+        assert_eq!(notes_containing(&events, "ASSESS check"), 0, "{events:?}");
+        // read-only turns are never nudged either
+        let dir2 = temp_root("assess-ro");
+        std::fs::write(dir2.join("r.txt"), "hi").unwrap();
+        let sess = session_in(
+            dir2.to_str().unwrap(),
+            vec![
+                ScriptStep::Turn(turn_tool("read_file", serde_json::json!({ "path": "r.txt" }))),
+                ScriptStep::Turn(turn_text("answer")),
+            ],
+            None,
+        );
+        let events = run_and_collect(&sess).await;
+        assert_eq!(notes_containing(&events, "ASSESS check"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[tokio::test]
+    async fn resolve_gate_flags_a_partial_commit() {
+        let dir = temp_root("resolve");
+        let root = dir.to_str().unwrap().to_string();
+        crate::exec::run(&["git", "init", "-q"], &root, None).await.unwrap();
+        std::fs::write(dir.join("a.txt"), "committed half").unwrap();
+        std::fs::write(dir.join("b.txt"), "forgotten half").unwrap();
+        const GIT_C: &str = "git -c user.email=t@t -c user.name=t";
+        let sess = session_in(
+            &root,
+            vec![
+                ScriptStep::Turn(turn_tool("bash", serde_json::json!({ "command": format!("git add a.txt && {GIT_C} commit -qm half") }))),
+                ScriptStep::Turn(turn_text("shipped!")), // tree still dirty (b.txt) → nudged
+                ScriptStep::Turn(turn_tool("bash", serde_json::json!({ "command": format!("git add -A && {GIT_C} commit -qm rest") }))),
+                ScriptStep::Turn(turn_text("now fully shipped")),
+            ],
+            None,
+        );
+        let events = run_and_collect(&sess).await;
+        assert_eq!(notes_containing(&events, "RESOLVE check"), 1, "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Done)));
+        // a clean full commit is not nudged
+        let dir2 = temp_root("resolve-ok");
+        let root2 = dir2.to_str().unwrap().to_string();
+        crate::exec::run(&["git", "init", "-q"], &root2, None).await.unwrap();
+        std::fs::write(dir2.join("a.txt"), "everything").unwrap();
+        let sess = session_in(
+            &root2,
+            vec![
+                ScriptStep::Turn(turn_tool("bash", serde_json::json!({ "command": format!("git add -A && {GIT_C} commit -qm all") }))),
+                ScriptStep::Turn(turn_text("shipped")),
+            ],
+            None,
+        );
+        let events = run_and_collect(&sess).await;
+        assert_eq!(notes_containing(&events, "RESOLVE check"), 0, "{events:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn compaction_elides_old_tool_bodies_and_is_idempotent() {
+        let big = "x".repeat(300);
+        let mut msgs = vec![ChatMessage::system("sys"), ChatMessage::user("go")];
+        for i in 0..12 {
+            msgs.push(ChatMessage {
+                role: "tool".into(),
+                content: Some(big.clone()),
+                tool_calls: vec![],
+                tool_call_id: Some(format!("c{i}")),
+            });
+        }
+        assert_eq!(compact_history(&mut msgs, 8), 4);
+        assert!(msgs[2].content.as_deref().unwrap().starts_with("[elided"));
+        assert!(!msgs[6].content.as_deref().unwrap().starts_with("[elided"), "recent kept");
+        assert_eq!(compact_history(&mut msgs, 8), 0, "idempotent");
+        // small results and non-tool roles are untouched
+        assert_eq!(msgs[0].content.as_deref(), Some("sys"));
+    }
+
+    #[test]
+    fn check_command_detection() {
+        assert!(is_check_command("cargo test --lib", None));
+        assert!(is_check_command("cd app && python -m pytest -q", None));
+        assert!(!is_check_command("echo hello", None));
+        assert!(is_check_command("echo hello", Some("echo hello")));
+        assert!(is_check_command("bash -lc 'make verify'", Some("make verify")));
     }
 
     fn spear_notes(events: &[AgentEvent]) -> usize {

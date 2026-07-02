@@ -12,10 +12,14 @@ fn identity(role: &str, company: Option<&str>) -> String {
     )
 }
 
-fn working_context(cwd: &str) -> String {
+fn working_context(cwd: &str, check: Option<&str>) -> String {
+    let check_line = match check {
+        Some(c) => format!("\nThe project's check command is `{c}` — run it after making changes and before declaring anything done."),
+        None => String::new(),
+    };
     enclose(
         "context",
-        &format!("Your current working directory is {cwd}. You have full access to it through your tools — read files, search, edit, and run commands. Act; don't ask for permission to use a tool, and get things done."),
+        &format!("Your current working directory is {cwd}. You have full access to it through your tools — read files, search, edit, and run commands. Act; don't ask for permission to use a tool, and get things done.{check_line}"),
     )
 }
 
@@ -66,10 +70,10 @@ fn instructions() -> String {
 
 
 /// Build the system prompt for a session rooted at `cwd`.
-pub fn system_prompt(cwd: &str, company: Option<&str>) -> String {
+pub fn system_prompt(cwd: &str, company: Option<&str>, check: Option<&str>) -> String {
     let mut sections = vec![
         identity("a staff software engineer and architect", company),
-        working_context(cwd),
+        working_context(cwd, check),
     ];
     sections.extend(project_docs(cwd));
     sections.push(instructions());
@@ -79,8 +83,8 @@ pub fn system_prompt(cwd: &str, company: Option<&str>) -> String {
 /// System prompt for a delegate subagent: the focused-worker identity plus the SAME working context
 /// and project docs the primary agent gets. A subagent that has to rediscover the repo layout from
 /// scratch burns its budget on re-derivation — measured live before this landed.
-pub fn subagent_system_prompt(cwd: &str) -> String {
-    let mut sections = vec![crate::subagent::subagent_prompt(), working_context(cwd)];
+pub fn subagent_system_prompt(cwd: &str, check: Option<&str>) -> String {
+    let mut sections = vec![crate::subagent::subagent_prompt(), working_context(cwd, check)];
     sections.extend(project_docs(cwd));
     sections.join("\n\n")
 }
@@ -91,7 +95,7 @@ mod tests {
 
     #[test]
     fn prompt_frames_spear_as_a_heuristic_with_a_decidable_delegate_test() {
-        let p = system_prompt("/repo", None);
+        let p = system_prompt("/repo", None, None);
         assert!(p.contains("operating heuristic, not a ritual"));
         assert!(p.contains("can you already name the exact files"));
         assert!(p.contains("Re-check PLAN as you go"));
@@ -113,7 +117,7 @@ mod tests {
         let root = dir.to_str().unwrap();
         std::fs::write(dir.join("AGENTS.md"), "# Map\nRun `make check`.").unwrap();
 
-        let p = subagent_system_prompt(root);
+        let p = subagent_system_prompt(root, Some("make check"));
         assert!(p.contains("focused subagent"), "keeps the worker identity");
         assert!(p.contains(root), "knows its working directory");
         assert!(p.contains("Run `make check`."), "gets the project docs");
@@ -135,17 +139,17 @@ mod tests {
         let root = dir.to_str().unwrap();
 
         // No AGENTS.md → no project_docs section.
-        assert!(!system_prompt(root, None).contains("<project_docs>"));
+        assert!(!system_prompt(root, None, None).contains("<project_docs>"));
 
         std::fs::write(dir.join("AGENTS.md"), "# The Map\nBuild with `make x`.").unwrap();
-        let p = system_prompt(root, None);
+        let p = system_prompt(root, None, None);
         assert!(p.contains("<project_docs>"));
         assert!(p.contains("Build with `make x`."));
         assert!(p.contains("Subdirectories may carry their own AGENTS.md"));
 
         // Oversized docs are truncated with a pointer, not dropped.
         std::fs::write(dir.join("AGENTS.md"), "x".repeat(30_000)).unwrap();
-        let p = system_prompt(root, None);
+        let p = system_prompt(root, None, None);
         assert!(p.contains("truncated — read AGENTS.md"));
 
         let _ = std::fs::remove_dir_all(&dir);

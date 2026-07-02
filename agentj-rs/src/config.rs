@@ -22,6 +22,10 @@ pub struct AppConfig {
     pub max_idle_nudges: Option<u64>,
     #[serde(default)]
     pub job_idle_wait_s: Option<u64>,
+    /// The project's check command (tests/build/lint), e.g. "cargo test". Drives the ASSESS gate
+    /// and is surfaced in the system prompt.
+    #[serde(default)]
+    pub check: Option<String>,
 }
 
 impl AppConfig {
@@ -33,6 +37,7 @@ impl AppConfig {
         self.max_steps = other.max_steps.or(self.max_steps.take());
         self.max_idle_nudges = other.max_idle_nudges.or(self.max_idle_nudges.take());
         self.job_idle_wait_s = other.job_idle_wait_s.or(self.job_idle_wait_s.take());
+        self.check = other.check.or(self.check.take());
     }
 
     pub fn load(root: &str) -> Self {
@@ -68,6 +73,8 @@ pub struct Config {
     pub max_parallel_subagents: usize,
     /// Model context window for the context meter: `AGENTJ_CONTEXT_WINDOW` > model table > `None`.
     pub context_window: Option<u64>,
+    /// The project's check command (`AGENTJ_CHECK` > aj.json `check` > None → heuristics).
+    pub check: Option<String>,
 }
 
 impl Config {
@@ -79,6 +86,7 @@ impl Config {
                 max_steps: app.max_steps,
                 max_idle_nudges: app.max_idle_nudges,
                 job_idle_wait_s: app.job_idle_wait_s,
+                check: app.check.clone(),
             },
         )
     }
@@ -103,15 +111,17 @@ impl Config {
                 .unwrap_or(4) as usize,
             context_window: env_num("AGENTJ_CONTEXT_WINDOW")
                 .or_else(|| crate::model::context_window(model_id)),
+            check: get("AGENTJ_CHECK").filter(|s| !s.is_empty()).or(file.check),
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct RuntimeFileConfig {
     max_steps: Option<u64>,
     max_idle_nudges: Option<u64>,
     job_idle_wait_s: Option<u64>,
+    check: Option<String>,
 }
 
 fn read_config(path: &Path) -> AppConfig {
@@ -140,8 +150,18 @@ mod tests {
                 max_steps: None,
                 max_idle_nudges: None,
                 job_idle_wait_s: None,
+                check: None,
             },
         )
+    }
+
+    fn e_file() -> RuntimeFileConfig {
+        RuntimeFileConfig {
+            max_steps: None,
+            max_idle_nudges: None,
+            job_idle_wait_s: None,
+            check: Some("make check".into()),
+        }
     }
 
     fn from_all(pairs: &[(&str, &str)], model_id: &str, file: RuntimeFileConfig) -> Config {
@@ -183,8 +203,9 @@ mod tests {
             max_steps: Some(9),
             max_idle_nudges: Some(3),
             job_idle_wait_s: Some(15),
+            check: Some("make check".into()),
         };
-        let d = from_all(&[], "unknown-model", file);
+        let d = from_all(&[], "unknown-model", file.clone());
         assert_eq!(d.max_steps, 9);
         assert_eq!(d.max_idle_nudges, 3);
         assert_eq!(d.idle_wait, Duration::from_secs(15));
@@ -193,6 +214,11 @@ mod tests {
 
         let e = from_all(&[("AGENTJ_MAX_STEPS", "11")], "unknown-model", file);
         assert_eq!(e.max_steps, 11);
+        assert_eq!(e.check.as_deref(), Some("make check"));
+        assert_eq!(
+            from_all(&[("AGENTJ_CHECK", "bun test")], "unknown-model", e_file()).check.as_deref(),
+            Some("bun test")
+        );
     }
 
     #[test]
@@ -205,6 +231,7 @@ mod tests {
                     max_steps: None,
                     max_idle_nudges: None,
                     job_idle_wait_s: None,
+                    check: None,
                 }
             )
             .context_window,
@@ -218,6 +245,7 @@ mod tests {
                     max_steps: None,
                     max_idle_nudges: None,
                     job_idle_wait_s: None,
+                    check: None,
                 }
             )
             .context_window,

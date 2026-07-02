@@ -183,7 +183,8 @@ async fn main() {
     };
 
     let company = config::AppConfig::env_or_file("AGENTJ_COMPANY", app_cfg.company.as_deref());
-    let system = prompt::system_prompt(&root, company.as_deref());
+    let check = config::AppConfig::env_or_file("AGENTJ_CHECK", app_cfg.check.as_deref());
+    let system = prompt::system_prompt(&root, company.as_deref(), check.as_deref());
 
     // Connect MCP servers once at startup; failures become one-line notices.
     let mcp_configs = mcp::config::load_mcp_servers(&root);

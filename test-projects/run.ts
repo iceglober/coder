@@ -83,8 +83,9 @@ const argv = process.argv.slice(2);
 const selftest = argv.includes("--selftest");
 const allPrompts = argv.includes("--all-prompts");
 const budgetSoft = argv.includes("--budget-soft"); // calibration mode: budget breaches warn instead of fail
+const repeat = argv.includes("--repeat") ? Math.max(1, Number(argv[argv.indexOf("--repeat") + 1]) || 1) : 1;
 const promptSel = argv.includes("--prompt") ? argv[argv.indexOf("--prompt") + 1] : undefined;
-const filter = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--prompt")[0];
+const filter = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--prompt" && argv[i - 1] !== "--repeat")[0];
 const tasks = parseJsonc(await readFile(join(HERE, "tasks.jsonc"), "utf8")).filter((t) => !filter || t.id.includes(filter));
 
 /** The (variant name, prompt text) pairs to run for a task. Default = the first listed variant. */
@@ -118,8 +119,9 @@ async function runAgent(cwd: string, prompt: string, runEnv: Record<string, stri
 }
 
 for (const t of tasks)
-for (const { vname, vtext } of variantsOf(t)) {
-  const label = vname ? `${t.id}@${vname}` : t.id;
+for (const { vname, vtext } of variantsOf(t))
+for (let rep = 1; rep <= (selftest ? 1 : repeat); rep++) {
+  const label = `${vname ? `${t.id}@${vname}` : t.id}${repeat > 1 ? `#${rep}` : ""}`;
   console.log(`\n\x1b[1m▶ ${label}\x1b[0m  (${t.project})`);
   const lack = (t.needs ?? []).filter((tool) => !Bun.which(tool));
   if (lack.length) {
