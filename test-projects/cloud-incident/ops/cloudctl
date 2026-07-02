@@ -27,9 +27,29 @@ EXAMPLES
   cloudctl config payments
   cloudctl metrics payments charge_p99_ms`;
 
-function flag(args: string[], name: string): string | undefined {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 ? args[i + 1] : undefined;
+/** Strict flag parsing: unknown flags are an error (real CLIs don't guess), known flags take a value. */
+function parseArgs(args: string[], known: string[]): { flags: Record<string, string>; positional: string[] } {
+  const flags: Record<string, string> = {};
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("--")) {
+      const name = a.slice(2);
+      if (!known.includes(name)) {
+        console.error(`unknown flag --${name}. Valid flags: ${known.map((k) => `--${k}`).join(" ") || "(none)"}`);
+        process.exit(2);
+      }
+      const v = args[++i];
+      if (v === undefined) {
+        console.error(`flag --${name} needs a value`);
+        process.exit(2);
+      }
+      flags[name] = v;
+    } else {
+      positional.push(a);
+    }
+  }
+  return { flags, positional };
 }
 
 function readGroup(group: string): string[] {
@@ -63,15 +83,16 @@ if (cmd === "logs" && sub === "groups") {
 }
 
 if (cmd === "logs" && sub === "query") {
-  const group = rest.find((a) => !a.startsWith("--"));
+  const { flags, positional } = parseArgs(rest, ["since", "until", "filter", "limit"]);
+  const group = positional[0];
   if (!group) {
     console.error("usage: cloudctl logs query <group> [--since ISO] [--until ISO] [--filter substr] [--limit N]");
     process.exit(2);
   }
-  const since = flag(rest, "since");
-  const until = flag(rest, "until");
-  const filter = flag(rest, "filter");
-  const limit = Number(flag(rest, "limit") ?? 50);
+  const since = flags.since;
+  const until = flags.until;
+  const filter = flags.filter;
+  const limit = Number(flags.limit ?? 50);
   const matched = readGroup(group).filter((l) => {
     // ts is the first field of every line; lexicographic compare works for ISO8601 prefixes.
     const t = l.slice(7, 31);

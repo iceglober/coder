@@ -31,6 +31,7 @@
     "project": "pnpm-vitest-monorepo",
     "prompt": "A unit test is failing in @harness/core. Find the root cause and fix it so the whole test suite passes.",
     "seed": "cp _seeds/money-bug.ts packages/core/src/money.ts",
+    "needs": ["pnpm"],
     "setup": "pnpm install --silent",
     "verify": "pnpm -r test",
     "note": "Full[Simple]: isolated one-file bug fix. Exercises workspace detection + single-test iteration + fixing source, not the test."
@@ -40,6 +41,7 @@
     "project": "pnpm-vitest-monorepo",
     "prompt": "Add stacking discount codes to @harness/core. A code is either a percentage off or a fixed cents amount; a cart can apply several. Implement a `discount` module: `applyCodes(subtotalCents, codes)` applies the codes IN ORDER to a running total — percent codes take that percent off the current total (a percent above 100 is clamped to 100, never negative; round to the nearest cent), fixed codes subtract cents, and the total never drops below 0. Also add `cartTotalAfterCodes(items, codes)` that applies the codes to the cart subtotal. A test spec (`discount.test.ts`) defines the exact rules and edge cases.",
     "seed": "cp _seeds/discount.test.ts packages/core/src/discount.test.ts",
+    "needs": ["pnpm"],
     "setup": "pnpm install --silent",
     "verify": "pnpm -r test",
     "note": "Full[Moderate] — mid-level, barely: a discount engine with order-dependent stacking, a 0 floor, a percent clamp, cent rounding, and cart wiring. The difficulty is the rules + edge cases, not the file count."
@@ -49,6 +51,7 @@
     "project": "pnpm-vitest-monorepo",
     "prompt": "Make @harness/core currency-aware. Introduce a `Money` value type (cents + currency) with `Money.of(cents, currency)`, `.add`, `.subtract`, and `.format()` — formatting is currency-aware (USD → \"$12.99\", EUR → \"€12.99\") and arithmetic across DIFFERENT currencies must throw (no implicit conversion). Then migrate the domain to it: `formatUSD` must keep its exact existing output, and the cart's subtotal must become a `Money` in the cart's currency (a mixed-currency cart is rejected). Test specs (`money.currency.test.ts`, and a rewritten `cart.test.ts`) define the contract; all existing behavior must stay green.",
     "seed": "cp _seeds/money-currency.test.ts packages/core/src/money.currency.test.ts && cp _seeds/cart-currency.test.ts packages/core/src/cart.test.ts",
+    "needs": ["pnpm"],
     "setup": "pnpm install --silent",
     "verify": "pnpm -r test",
     "note": "Full[Advanced] — staff+: introduce currency as a first-class concept (a Money value type with currency guards) and migrate money + cart to it while preserving formatUSD. Cross-module, architectural, behavior-preserving."
@@ -57,6 +60,7 @@
     "id": "js-architect",
     "project": "pnpm-vitest-monorepo",
     "prompt": "The store applies money adjustments (a discount here, an order limit there) ad-hoc, and the team keeps needing new ones — taxes, shipping fees, loyalty credits. Design and implement an EXTENSIBLE pricing pipeline in @harness/core: a clean way to define pricing rules that transform a cart's running total in an explicit order, so adding a new rule type is easy and the order of application is clear. Decide the abstraction yourself, wire at least two concrete rules (e.g. a percentage discount and a flat fee) through it, and keep the existing code working. There is no test spec — make the design sound and verify it builds.",
+    "needs": ["pnpm"],
     "setup": "pnpm install --silent",
     "verify": "pnpm -r test",
     "judge": "Grade as a staff engineer reviewing an extensible pricing pipeline. (1) ABSTRACTION: a clear rule type/interface mapping a running total to a new total, not ad-hoc branching. (2) COMPOSITION: rules apply in an explicit, well-defined ORDER via a pipeline/reduce; order is first-class. (3) EXTENSIBILITY: adding a rule type means writing a new rule, NOT editing a central switch; shown with >=2 concrete rules (e.g. percentage discount + flat fee). (4) SAFETY: sensible edges (total floored at >=0; no silent corruption). (5) COHESION: idiomatic and NOT over-engineered (no speculative plugin-registry/DI for a small store). (6) PRESERVES EXISTING: existing money/cart/order behavior still works and the agent verified its work. PASS only if the abstraction is genuinely extensible + ordered + sound — not a thin wrapper or a hardcoded chain.",
@@ -119,7 +123,10 @@
   {
     "id": "dist-question",
     "project": "bun-microservices",
-    "prompt": "In this system, which service owns stock reservations, and which HTTP endpoint releases a reservation? Answer; don't change anything.",
+    "prompts": {
+      "terse": "which service owns stock reservations here, and how do I release one?",
+      "detailed": "In this system, which service owns stock reservations, and which HTTP endpoint releases a reservation? Answer; don't change anything."
+    },
     "expect": ["inventory", "/release"],
     "expectNoChange": true,
     "note": "Question (distributed): requires mapping the service topology, read-only."
@@ -127,7 +134,10 @@
   {
     "id": "dist-investigation",
     "project": "bun-microservices",
-    "prompt": "Incident INC-231 (see ops/incident.md): a customer clicked buy ONCE for two WIDGET-9, was charged twice, and stock dropped 5 -> 1. Using the captured logs in ops/logs/ and the service code, trace what happened across the services and report the root cause chain: which configured value set it off, which behavior amplified it, and what the customer-visible + inventory effects were. INVESTIGATION ONLY — do NOT modify any files; report your diagnosis.",
+    "prompts": {
+      "terse": "support escalation: a customer says they clicked buy once, got an error page, was charged twice, and our WIDGET-9 stock count drifted. can you work out what actually happened? don't change anything yet — just the diagnosis.",
+      "detailed": "Incident INC-231 (see ops/incident.md): a customer clicked buy ONCE for two WIDGET-9, was charged twice, and stock dropped 5 -> 1. Using the captured logs in ops/logs/ and the service code, trace what happened across the services and report the root cause chain: which configured value set it off, which behavior amplified it, and what the customer-visible + inventory effects were. INVESTIGATION ONLY — do NOT modify any files; report your diagnosis."
+    },
     "expect": ["250", "WIDGET-9"],
     "expectNoChange": true,
     "timeoutSec": 600,
@@ -136,7 +146,10 @@
   {
     "id": "dist-debug",
     "project": "bun-microservices",
-    "prompt": "An end-to-end test is failing: after a declined payment, the reserved stock is never returned to the pool. The bug is somewhere in the cross-service checkout flow (gateway -> orders -> inventory). Trace the flow, find the root cause, and fix it so the whole e2e suite passes. Fix the source, not the tests.",
+    "prompts": {
+      "terse": "declined payments seem to eat inventory — the stock never comes back and the e2e suite is red. can you fix it?",
+      "detailed": "An end-to-end test is failing: after a declined payment, the reserved stock is never returned to the pool. The bug is somewhere in the cross-service checkout flow (gateway -> orders -> inventory). Trace the flow, find the root cause, and fix it so the whole e2e suite passes. Fix the source, not the tests."
+    },
     "seed": "cp _seeds/release-bug.inventory.ts services/inventory.ts",
     "verify": "bun test e2e",
     "solution": "cp _seeds/solutions/dist-debug/services/inventory.ts services/inventory.ts",
@@ -146,7 +159,10 @@
   {
     "id": "dist-tracing",
     "project": "bun-microservices",
-    "prompt": "Implement end-to-end request tracing across all three services. Contract (defined by e2e/tracing.test.ts): the gateway honors an inbound x-request-id header or generates one; the id is propagated to orders and inventory on every internal HTTP call; every log line each service writes while handling that request includes a requestId field; and the gateway echoes the id back as an x-request-id response header. Make the whole e2e suite pass.",
+    "prompts": {
+      "terse": "we need request ids threaded through the whole stack. spec's in e2e/tracing.test.ts — make the suite green.",
+      "detailed": "Implement end-to-end request tracing across all three services. Contract (defined by e2e/tracing.test.ts): the gateway honors an inbound x-request-id header or generates one; the id is propagated to orders and inventory on every internal HTTP call; every log line each service writes while handling that request includes a requestId field; and the gateway echoes the id back as an x-request-id response header. Make the whole e2e suite pass."
+    },
     "seed": "cp _seeds/tracing.test.ts e2e/tracing.test.ts",
     "verify": "bun test e2e",
     "solution": "cp -R _seeds/solutions/dist-tracing/services/. services/",
@@ -156,7 +172,10 @@
   {
     "id": "dist-feature",
     "project": "bun-microservices",
-    "prompt": "Make checkout retry-safe with idempotency keys — this is the proper fix for incident INC-231 (ops/incident.md). Contract (defined by e2e/idempotency.test.ts): a client may send an Idempotency-Key header on POST /checkout; the gateway forwards it to the orders service; replaying a checkout with the same key returns the SAME order (no new reservation, stock reserved exactly once); different keys are independent orders; requests without a key behave as today. Make the whole e2e suite pass.",
+    "prompts": {
+      "terse": "make checkout retries safe with idempotency keys. spec's in e2e/idempotency.test.ts — make the suite green.",
+      "detailed": "Make checkout retry-safe with idempotency keys — this is the proper fix for incident INC-231 (ops/incident.md). Contract (defined by e2e/idempotency.test.ts): a client may send an Idempotency-Key header on POST /checkout; the gateway forwards it to the orders service; replaying a checkout with the same key returns the SAME order (no new reservation, stock reserved exactly once); different keys are independent orders; requests without a key behave as today. Make the whole e2e suite pass."
+    },
     "seed": "cp _seeds/idempotency.test.ts e2e/idempotency.test.ts",
     "verify": "bun test e2e",
     "solution": "cp -R _seeds/solutions/dist-feature/services/. services/",
@@ -166,7 +185,10 @@
   {
     "id": "cloud-investigation",
     "project": "cloud-incident",
-    "prompt": "You are on call. Work incident INC-407 (brief in ops/INC-407.md): during the 2026-07-01 morning traffic ramp, checkouts failed with 502s and several customers got DOUBLE pending charges for one purchase attempt. Production logs, deploy history, config history, and metrics are only available through the cloud CLI at ./ops/cloudctl (start with `./ops/cloudctl help`). Establish the full root-cause chain: what change set the incident up, what conditions triggered it, how the failure propagated across services, and what produced the duplicate charges. Cite the specific deploy and configuration involved. INVESTIGATION ONLY — do NOT modify any files; report your diagnosis.",
+    "prompts": {
+      "terse": "on-call ping: INC-407 — 502s at checkout and duplicate pending charges yesterday morning. need the root cause. (brief in ops/INC-407.md; hands off the code, diagnosis only)",
+      "detailed": "You are on call. Work incident INC-407 (brief in ops/INC-407.md): during the 2026-07-01 morning traffic ramp, checkouts failed with 502s and several customers got DOUBLE pending charges for one purchase attempt. Production logs, deploy history, config history, and metrics are only available through the cloud CLI at ./ops/cloudctl (start with `./ops/cloudctl help`). Establish the full root-cause chain: what change set the incident up, what conditions triggered it, how the failure propagated across services, and what produced the duplicate charges. Cite the specific deploy and configuration involved. INVESTIGATION ONLY — do NOT modify any files; report your diagnosis."
+    },
     "expect": ["d-9182", "PAYMENT_CONNECTION_POOL"],
     "expectNoChange": true,
     "timeoutSec": 900,
@@ -175,7 +197,10 @@
   {
     "id": "cloud-debug",
     "project": "cloud-incident",
-    "prompt": "An e2e test is failing: when the SAME order is charged twice CONCURRENTLY (a gateway retry racing the original request), the payments service places two auth holds — a double charge. Sequential duplicates are handled fine. Find the root cause and fix it so `bun test e2e/holds.test.ts` passes reliably. Fix the source, not the tests.",
+    "prompts": {
+      "terse": "payments double-holds when the same order gets charged twice at the same time — holds e2e is red. fix it properly, not the test.",
+      "detailed": "An e2e test is failing: when the SAME order is charged twice CONCURRENTLY (a gateway retry racing the original request), the payments service places two auth holds — a double charge. Sequential duplicates are handled fine. Find the root cause and fix it so `bun test e2e/holds.test.ts` passes reliably. Fix the source, not the tests."
+    },
     "seed": "cp _seeds/race.payments.ts services/payments.ts",
     "verify": "bun test e2e/holds.test.ts && bun test e2e/holds.test.ts && bun test e2e/holds.test.ts",
     "solution": "cp _seeds/solutions/cloud-debug/services/payments.ts services/payments.ts",
@@ -185,12 +210,27 @@
   {
     "id": "cloud-capstone",
     "project": "cloud-incident",
-    "prompt": "The load-burst e2e test (e2e/load.test.ts, guarding against a repeat of incident INC-407) is failing: a 16-checkout burst no longer fully succeeds. Something regressed this system's capacity. Use the production evidence available through ./ops/cloudctl (logs, deploys, config history, metrics — start with `./ops/cloudctl help`) to establish what changed and why it breaks the burst, then fix the source so the WHOLE e2e suite passes. In your final report, cite the specific deploy that introduced the regression.",
+    "prompts": {
+      "terse": "the load-burst e2e is red — something regressed our checkout capacity recently. figure out what actually changed (check the prod evidence, don't guess), fix it, and say which deploy did it.",
+      "detailed": "The load-burst e2e test (e2e/load.test.ts, guarding against a repeat of incident INC-407) is failing: a 16-checkout burst no longer fully succeeds. Something regressed this system's capacity. Use the production evidence available through ./ops/cloudctl (logs, deploys, config history, metrics — start with `./ops/cloudctl help`) to establish what changed and why it breaks the burst, then fix the source so the WHOLE e2e suite passes. In your final report, cite the specific deploy that introduced the regression."
+    },
     "verify": "bun test e2e",
     "expect": ["d-9182"],
     "solution": "cp _seeds/solutions/cloud-capstone/services/payments.ts services/payments.ts",
     "timeoutSec": 1200,
     "note": "HARD capstone: diagnose-then-fix. The committed fixture ships the regressed pool (4); the failing load test reproduces INC-407. Graded on BOTH the suite going green and the report citing deploy d-9182 — evidence-guided repair, not just turning a knob until tests pass."
+  },
+  {
+    "id": "cloud-needle",
+    "project": "cloud-incident",
+    "prompts": {
+      "terse": "support escalation: customer with card ending 9911 says they were charged $129.99 yesterday around 07:40 UTC but has no order and never got a confirmation. where did their order go? don't change anything — just find out.",
+      "detailed": "A customer reports a charge of $129.99 (card ending 9911) at roughly 2026-07-01T07:40 UTC with no resulting order and no confirmation. Production logs, deploy history, config, and metrics are available only through ./ops/cloudctl (start with `./ops/cloudctl help`). The relevant evidence is a handful of lines among thousands — filtered, time-windowed queries are the only practical route. Trace the customer's request across the services, identify the order, and explain exactly why it vanished. INVESTIGATION ONLY — do NOT modify any files; report your diagnosis."
+    },
+    "expect": ["o-99117", "OOM"],
+    "expectNoChange": true,
+    "timeoutSec": 900,
+    "note": "HARD needle-in-haystack: one orphaned order (charged + reserved, never confirmed) and a single OOM boot line hidden in ~9k lines across 5 log groups; unfiltered limit-50 dumps cannot surface it. Same corpus as INC-407 — two overlapping incidents must be kept apart."
   },
   {
     "id": "go-question",

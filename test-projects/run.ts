@@ -38,7 +38,12 @@ const EXCLUDE = ":(exclude).agentj";
 interface Task {
   id: string;
   project: string;
-  prompt: string;
+  /** Single prompt (legacy tasks). */
+  prompt?: string;
+  /** Named prompt variants (e.g. terse | detailed) — same fixture, same graders, different levels of
+   * hand-holding. The FIRST listed variant is the default (keep it the terse, real-world one);
+   * select with --prompt <name> or run all with --all-prompts. */
+  prompts?: Record<string, string>;
   seed?: string; // shell run on the fresh copy BEFORE the commit — perturbs the baseline (e.g. plant a bug)
   setup?: string;
   needs?: string[]; // tools that must be on PATH, else the task is SKIPPED (not failed)
@@ -74,8 +79,19 @@ const env = {
 
 const argv = process.argv.slice(2);
 const selftest = argv.includes("--selftest");
-const filter = argv.find((a) => !a.startsWith("--"));
+const allPrompts = argv.includes("--all-prompts");
+const promptSel = argv.includes("--prompt") ? argv[argv.indexOf("--prompt") + 1] : undefined;
+const filter = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--prompt")[0];
 const tasks = parseJsonc(await readFile(join(HERE, "tasks.jsonc"), "utf8")).filter((t) => !filter || t.id.includes(filter));
+
+/** The (variant name, prompt text) pairs to run for a task. Default = the first listed variant. */
+function variantsOf(t: Task): { vname: string; vtext: string }[] {
+  const entries = Object.entries(t.prompts ?? {});
+  if (selftest || !entries.length) return [{ vname: "", vtext: t.prompt ?? entries[0]?.[1] ?? "" }];
+  if (allPrompts) return entries.map(([vname, vtext]) => ({ vname, vtext }));
+  if (promptSel && t.prompts?.[promptSel]) return [{ vname: promptSel, vtext: t.prompts[promptSel] }];
+  return [{ vname: entries[0][0], vtext: entries[0][1] }];
+}
 
 const RESULTS = join(HERE, "results");
 const RUN_STAMP = new Date().toISOString().replace(/[:.]/g, "-");
@@ -98,20 +114,22 @@ async function runAgent(cwd: string, prompt: string, runEnv: Record<string, stri
   return { out: stripAnsi(so + se), timedOut };
 }
 
-for (const t of tasks) {
-  console.log(`\n\x1b[1m▶ ${t.id}\x1b[0m  (${t.project})`);
+for (const t of tasks)
+for (const { vname, vtext } of variantsOf(t)) {
+  const label = vname ? `${t.id}@${vname}` : t.id;
+  console.log(`\n\x1b[1m▶ ${label}\x1b[0m  (${t.project})`);
   const lack = (t.needs ?? []).filter((tool) => !Bun.which(tool));
   if (lack.length) {
     console.log(`  \x1b[33mSKIP\x1b[0m — needs ${lack.join(", ")} on PATH`);
-    results.push({ id: t.id, pass: true, skip: true, note: `skipped (no ${lack.join(",")})`, secs: 0 });
+    results.push({ id: label, pass: true, skip: true, note: `skipped (no ${lack.join(",")})`, secs: 0 });
     continue;
   }
   if (selftest && (!t.solution || !t.verify)) {
     console.log("  \x1b[33mSKIP\x1b[0m — selftest needs `solution` + `verify`");
-    results.push({ id: t.id, pass: true, skip: true, note: "selftest n/a", secs: 0 });
+    results.push({ id: label, pass: true, skip: true, note: "selftest n/a", secs: 0 });
     continue;
   }
-  const cwd = await mkdtemp(join(tmpdir(), `agentj-eval-${t.id}-`));
+  const cwd = await mkdtemp(join(tmpdir(), `agentj-eval-${label.replace("@", "-")}-`));
   const started = Date.now();
   try {
     await cp(join(HERE, t.project), cwd, { recursive: true });
@@ -144,15 +162,15 @@ for (const t of tasks) {
       }
       const pass = fails.length === 0;
       const secs = Math.round((Date.now() - started) / 1000);
-      results.push({ id: t.id, pass, note: "selftest", secs });
+      results.push({ id: label, pass, note: "selftest", secs });
       console.log(`  ${pass ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"} · ${secs}s · selftest (fails unsolved ✓, solution passes ✓)`);
       if (!pass) for (const f of fails) console.log(`    \x1b[31m✗\x1b[0m ${f}`);
       continue;
     }
 
-    console.log(`  agentj: "${t.prompt.slice(0, 70)}…"`);
-    const { out, timedOut } = await runAgent(cwd, t.prompt, runEnv, t.timeoutSec ?? 600);
-    await writeFile(join(RESULTS, "out", `${RUN_STAMP}-${t.id}.txt`), out);
+    console.log(`  agentj: "${vtext.slice(0, 70)}…"`);
+    const { out, timedOut } = await runAgent(cwd, vtext, runEnv, t.timeoutSec ?? 600);
+    await writeFile(join(RESULTS, "out", `${RUN_STAMP}-${label.replace("@", "-")}.txt`), out);
 
     // Grade. Every grader present must pass. Diff-based graders compare the index (after `git add -A`)
     // to `base`, so they capture agentj's whole solution whether or not it committed.
@@ -182,15 +200,15 @@ for (const t of tasks) {
 
     const pass = fails.length === 0;
     const secs = Math.round((Date.now() - started) / 1000);
-    results.push({ id: t.id, pass, note: changed, secs });
+    results.push({ id: label, pass, note: changed, secs });
     await appendFile(
       join(RESULTS, "history.jsonl"),
-      `${JSON.stringify({ ts: new Date().toISOString(), run: RUN_STAMP, id: t.id, pass, secs, changedFiles: changedFiles.length, fails })}\n`,
+      `${JSON.stringify({ ts: new Date().toISOString(), run: RUN_STAMP, id: t.id, variant: vname || undefined, pass, secs, changedFiles: changedFiles.length, fails })}\n`,
     );
     console.log(`  ${pass ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"} · ${secs}s · ${changed}`);
     if (!pass) for (const f of fails) console.log(`    \x1b[31m✗\x1b[0m ${f}`);
   } catch (err) {
-    results.push({ id: t.id, pass: false, note: `error: ${err}`, secs: Math.round((Date.now() - started) / 1000) });
+    results.push({ id: label, pass: false, note: `error: ${err}`, secs: Math.round((Date.now() - started) / 1000) });
     console.log(`  \x1b[31mERROR\x1b[0m ${err}`);
   } finally {
     if (process.env.KEEP) console.log(`  kept: ${cwd}`);

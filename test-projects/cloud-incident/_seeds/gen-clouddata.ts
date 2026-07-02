@@ -100,6 +100,14 @@ for (let i = 0; i < 14; i++) {
 }
 put("svc-orders", { ts: ts(5, 4, 40), service: "orders", level: "info", msg: "psp webhook signatures verifying again — clock skew corrected upstream" });
 
+// INC-412 (the needle): a single orphaned order at 07:41. The customer's card (…9911) was charged —
+// payments placed the hold, inventory reserved — but the orders process was OOM-killed before it
+// confirmed or released anything. Exactly one boot line marks it; nothing else that morning does.
+put("svc-orders", { ts: ts(7, 41, 12, 208), service: "orders", level: "info", msg: "order received", id: "o-99117", sku: "SPROCKET-2", qty: 1 });
+put("svc-inventory", { ts: ts(7, 41, 12, 344), service: "inventory", level: "info", msg: "reserved", reservationId: "res-o-99117", sku: "SPROCKET-2", qty: 1, remaining: 212 });
+put("svc-payments", { ts: ts(7, 41, 12, 501), service: "payments", level: "info", msg: "auth hold created", orderId: "o-99117", holdId: "hold-77012", amountCents: 12999, cardLast4: "9911", durationMs: 96 });
+put("svc-orders", { ts: ts(7, 42, 3, 90), service: "orders", level: "warn", msg: "process start — cold boot; previous instance OOM-killed", rss_mb_at_kill: 1893, pid: 22841 });
+
 // Write hourly gz shards, sorted by time.
 for (const [g, lines] of Object.entries(groups)) {
   lines.sort((a, b) => (a.ts < b.ts ? -1 : 1));
@@ -159,7 +167,17 @@ writeFileSync(
   JSON.stringify(
     {
       gateway: { rps: metric((b) => (inWindow(b, "2026-07-01T09:10", "2026-07-01T09:30") ? 70 + Math.floor(rand() * 20) : 9 + Math.floor(rand() * 6))) },
-      orders: { error_rate: metric((b) => (inWindow(b, "2026-07-01T09:12", "2026-07-01T09:28") ? 0.31 + rand() * 0.2 : rand() * 0.01)) },
+      orders: {
+        error_rate: metric((b) => (inWindow(b, "2026-07-01T09:12", "2026-07-01T09:28") ? 0.31 + rand() * 0.2 : rand() * 0.01)),
+        // Corroborates INC-412: memory climbs through the early morning and resets at the 07:42 OOM kill.
+        memory_rss_mb: metric((b) => {
+          if (b < "2026-07-01T07:45") {
+            const minutes = (Number(b.slice(11, 13)) - 5) * 60 + Number(b.slice(14, 16));
+            return 240 + Math.floor(minutes * 10.2) + Math.floor(rand() * 15);
+          }
+          return 215 + Math.floor(rand() * 30);
+        }),
+      },
       payments: {
         charge_p99_ms: metric((b) => (inWindow(b, "2026-07-01T09:12", "2026-07-01T09:28") ? 2400 + Math.floor(rand() * 5600) : 140 + Math.floor(rand() * 60))),
         pool_wait_p99_ms: metric((b) => (inWindow(b, "2026-07-01T09:12", "2026-07-01T09:28") ? 900 + Math.floor(rand() * 2600) : Math.floor(rand() * 8))),
