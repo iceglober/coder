@@ -72,6 +72,9 @@ const env = {
   GOOGLE_VERTEX_PROJECT: process.env.GOOGLE_VERTEX_PROJECT ?? "ai-tooling-496018",
   GOOGLE_VERTEX_LOCATION: process.env.GOOGLE_VERTEX_LOCATION ?? "global",
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+  // Absolute path to the harness dir so a task's `verify` can invoke a HIDDEN grader that lives
+  // outside the fixture (used by suite-less frontend tasks the agent must self-verify with web_check).
+  AJ_GRADER_DIR: HERE,
 };
 
 const argv = process.argv.slice(2);

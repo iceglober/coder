@@ -1,0 +1,7 @@
+{
+  "name": "frontend-tip",
+  "private": true,
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}

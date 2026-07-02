@@ -291,6 +291,22 @@
     "note": "FRONTEND fix, browser-verified: the discount applies the percent as a whole number (missing /100), so SAVE10 on $10 shows -$90.00. Invisible to any unit test that doesn't render; the e2e suite drives real Chrome via Playwright. Exercises whether the agent fixes UI logic AND verifies it in a browser (web_check / e2e) rather than eyeballing. Needs bun + Chrome."
   },
   {
+    "id": "frontend-selfcheck",
+    "project": "frontend-tip",
+    "prompts": {
+      "terse": "the dinner receipt page is wrong — a $50 bill with an 18% tip shows the total as $950. mind fixing it?",
+      "detailed": "The receipt page renders a bill, a tip, and a grand total on load. The math is broken: a $50 bill with an 18% tip should show a $9.00 tip and a $59.00 total, but it shows $900.00 and $950.00. The bug is in app.js. There is NO test suite in this project — you cannot run a suite to check yourself. After fixing, render the page (start serve.ts) and use web_check to confirm the total is right and the page has no console errors. Don't just eyeball the source."
+    },
+    "setup": "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install",
+    "needs": ["bun"],
+    "verify": "bun \"$AJ_GRADER_DIR/frontend-tip-check.ts\"",
+    "expectChange": true,
+    "solution": "cp _seeds/solutions/frontend-tip/app.js app.js",
+    "budgetTokensIn": 120000,
+    "timeoutSec": 900,
+    "note": "SUITE-LESS frontend self-verification: same class of bug as frontend-fix (a percent applied without /100) but rendered ON LOAD, and the project ships NO test suite — the only way to know the fix worked is to render the page. The grader (frontend-tip-check.ts) is HIDDEN outside the fixture so the agent can't lean on it; it serves the agent's files and asserts tip=$9.00/total=$59.00 in real Chrome. Proves the agent self-verifies UI work with web_check rather than eyeballing. Needs bun + Chrome."
+  },
+  {
     "id": "go-question",
     "project": "go-stdlib",
     "prompt": "Which file in the store package formats currency, and what is the exact name of the function it exports for that? Answer; don't change anything.",
