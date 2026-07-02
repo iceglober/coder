@@ -19,7 +19,9 @@ try {
   browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
   const page = await browser.newPage();
   const ignore = (u) => u.includes("favicon.ico"); // browser auto-requests it; a 404 here is noise
-  page.on("console", (m) => { if (m.type() === "error" && !m.text().includes("favicon")) out.consoleErrors.push(m.text()); });
+  // "Failed to load resource" console errors are network failures — reported via the response handler
+  // below (which favicon-filters), so drop them here to avoid double-counting and favicon noise.
+  page.on("console", (m) => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) out.consoleErrors.push(m.text()); });
   page.on("pageerror", (e) => out.pageErrors.push(String(e)));
   page.on("response", (r) => { if (r.status() >= 400 && !ignore(r.url())) out.failedRequests.push(r.status() + " " + r.url()); });
   const resp = await page.goto(args.url, { waitUntil: "networkidle", timeout: args.timeoutMs ?? 15000 });

@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Store</title>
+  </head>
+  <body>
+    <h1>Store</h1>
+    <button data-add="WIDGET">Add Widget ($10.00)</button>
+    <button data-add="GADGET">Add Gadget ($25.00)</button>
+    <p>Items: <span id="count">0</span></p>
+    <p>Subtotal: <span id="subtotal">$0.00</span></p>
+    <p>
+      <input id="code" placeholder="discount code" />
+      <button id="apply">Apply</button>
+      <span id="applied"></span>
+    </p>
+    <p><strong>Total: <span id="total">$0.00</span></strong></p>
+    <script src="/app.js"></script>
+  </body>
+</html>

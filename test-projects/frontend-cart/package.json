@@ -1,0 +1,10 @@
+{
+  "name": "frontend-cart",
+  "private": true,
+  "scripts": {
+    "test:e2e": "bun test e2e"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}

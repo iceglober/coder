@@ -272,6 +272,22 @@
     "note": "HARD ghost hunt: the prompt ASSERTS a wrong code suspect (lib/search.ts is innocent and its e2e tests prove it). Truth: ops deploy d-9188 set ADMIN_MAINTENANCE=true for a reindex at 10:05 and never unset it — config history + the 200s-then-503s log boundary give it away. Passing requires rejecting the premise; changing code fails expectNoChange."
   },
   {
+    "id": "frontend-fix",
+    "project": "frontend-cart",
+    "prompts": {
+      "terse": "customers report the discount codes are broken — applying SAVE10 shows a negative total instead of 10% off. can you fix it?",
+      "detailed": "The storefront's percent discount codes are broken: applying a code like SAVE10 to the cart produces a NEGATIVE total instead of taking that percent off. The bug is in the frontend logic (app.js). Fix it so the end-to-end suite passes — `bun test e2e` boots the page in a real browser and asserts the displayed totals. This is UI work you cannot see from the source: after fixing, verify the page actually renders correctly (start the server and use web_check, or run the e2e suite), don't just eyeball the code."
+    },
+    "seed": "cp _seeds/discount-bug.app.js app.js",
+    "setup": "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install",
+    "needs": ["bun"],
+    "verify": "bun test e2e",
+    "solution": "cp _seeds/solutions/frontend-fix/app.js app.js",
+    "budgetTokensIn": 120000,
+    "timeoutSec": 900,
+    "note": "FRONTEND fix, browser-verified: the discount applies the percent as a whole number (missing /100), so SAVE10 on $10 shows -$90.00. Invisible to any unit test that doesn't render; the e2e suite drives real Chrome via Playwright. Exercises whether the agent fixes UI logic AND verifies it in a browser (web_check / e2e) rather than eyeballing. Needs bun + Chrome."
+  },
+  {
     "id": "go-question",
     "project": "go-stdlib",
     "prompt": "Which file in the store package formats currency, and what is the exact name of the function it exports for that? Answer; don't change anything.",
