@@ -42,11 +42,30 @@ struct SubResult {
     ok: bool,
 }
 
+/// The label a subagent shows in the tray: the model-supplied `title` when present, else the first
+/// sentence of the task (so instruction boilerplate like "Return a tight factual summary…" doesn't
+/// ride along), capped for sanity.
+fn task_label(task: &str, title: Option<&str>) -> String {
+    if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        return first_line(t, 80);
+    }
+    let line = first_line(task, 400);
+    let sentence = match line.find(". ") {
+        Some(i) => line[..=i].trim_end(),
+        None => line.as_str(),
+    };
+    if sentence.chars().count() > 100 {
+        format!("{}…", sentence.chars().take(99).collect::<String>())
+    } else {
+        sentence.to_string()
+    }
+}
+
 /// Run each `{ task, context? }` in `args.tasks` as a subagent, in parallel (bounded). Each sub-task's
 /// progress is forwarded to `tx` as structured `Subagent*` events. Returns the labeled results joined
 /// together for the model, plus whether every sub-task succeeded (for the delegate `ToolEnd.ok`).
 async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEvent>) -> (String, bool) {
-    let tasks: Vec<(String, Option<String>)> = args
+    let tasks: Vec<(String, Option<String>, String)> = args
         .get("tasks")
         .and_then(|v| v.as_array())
         .map(|a| {
@@ -57,7 +76,8 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
                         .get("context")
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string());
-                    Some((task, context))
+                    let label = task_label(&task, t.get("title").and_then(|x| x.as_str()));
+                    Some((task, context, label))
                 })
                 .collect()
         })
@@ -77,15 +97,13 @@ async fn run_delegate(sess: &Session, args: &Value, tx: &UnboundedSender<AgentEv
     let mut set: JoinSet<SubResult> = JoinSet::new();
     let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::new();
 
-    for (i, (task, context)) in tasks.into_iter().enumerate() {
+    for (i, (task, context, label)) in tasks.into_iter().enumerate() {
         let sess = sess.clone();
         let parent = tx.clone();
         let sem = sem.clone();
         let handle = set.spawn(async move {
             let _permit = sem.acquire_owned().await;
-            // Generous cap: the tray gives the title the full row width, so keep it intact.
-            let desc = first_line(&task, 160);
-            let _ = parent.send(AgentEvent::SubagentStart { id: i, desc });
+            let _ = parent.send(AgentEvent::SubagentStart { id: i, desc: label });
             let started = Instant::now();
             let prompt = match context {
                 Some(c) => format!("{task}\n\nContext:\n{c}"),
@@ -532,6 +550,52 @@ mod tests {
         assert!(deltas
             .iter()
             .any(|d| d.len() == 1 && d[0].role == "assistant" && d[0].tool_calls.is_empty()));
+    }
+
+    #[test]
+    fn task_label_prefers_title_then_first_sentence() {
+        assert_eq!(task_label("whatever", Some("Map the crate")), "Map the crate");
+        assert_eq!(
+            task_label(
+                "Map the Rust product in agentj-rs/. Return a tight factual summary with paths.",
+                None
+            ),
+            "Map the Rust product in agentj-rs/."
+        );
+        // whitespace-only title falls back
+        assert_eq!(task_label("Do the thing. And more.", Some("  ")), "Do the thing.");
+        // no sentence boundary → capped
+        let long = "x".repeat(150);
+        assert_eq!(task_label(&long, None).chars().count(), 100);
+    }
+
+    #[tokio::test]
+    async fn delegate_title_becomes_the_tray_label() {
+        let args = serde_json::json!({
+            "tasks": [{ "task": "Map the Rust product. Return a summary.", "title": "Map the Rust crate" }]
+        })
+        .to_string();
+        let sess = session(vec![
+            ScriptStep::Turn(AssistantTurn {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "delegate".into(),
+                        arguments: args,
+                    },
+                }],
+                finish_reason: "tool_calls".into(),
+                usage: None,
+            }),
+            ScriptStep::Turn(turn_text("sub result")),
+            ScriptStep::Turn(turn_text("done")),
+        ]);
+        let events = run_and_collect(&sess).await;
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SubagentStart { desc, .. } if desc == "Map the Rust crate")));
     }
 
     fn spear_notes(events: &[AgentEvent]) -> usize {

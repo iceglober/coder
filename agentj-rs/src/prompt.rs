@@ -19,6 +19,35 @@ fn working_context(cwd: &str) -> String {
     )
 }
 
+/// Character cap on the embedded AGENTS.md — beyond this it's truncated with a pointer to read the
+/// rest via tools. Generous: docs this size are the exception, not the rule.
+const MAX_DOC_CHARS: usize = 24_000;
+
+/// The repo's root `AGENTS.md`, embedded so the agent starts every session already knowing the
+/// project's map and conventions (this is what `/init` writes them for). `None` when absent/empty.
+fn project_docs(cwd: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(std::path::Path::new(cwd).join("AGENTS.md")).ok()?;
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let body = if text.chars().count() > MAX_DOC_CHARS {
+        let clipped: String = text.chars().take(MAX_DOC_CHARS).collect();
+        format!("{clipped}\n… [truncated — read AGENTS.md for the rest]")
+    } else {
+        text.to_string()
+    };
+    Some(enclose(
+        "project_docs",
+        &format!(
+            "The repository's AGENTS.md — its map and conventions. Follow it; it outranks your \
+             general instincts about how projects are usually laid out.\n\n{body}\n\n\
+             Subdirectories may carry their own AGENTS.md with local conventions — read it before \
+             working inside one."
+        ),
+    ))
+}
+
 fn instructions() -> String {
     enclose(
         "instructions",
@@ -38,12 +67,13 @@ fn instructions() -> String {
 
 /// Build the system prompt for a session rooted at `cwd`.
 pub fn system_prompt(cwd: &str, company: Option<&str>) -> String {
-    [
+    let mut sections = vec![
         identity("a staff software engineer and architect", company),
         working_context(cwd),
-        instructions(),
-    ]
-    .join("\n\n")
+    ];
+    sections.extend(project_docs(cwd));
+    sections.push(instructions());
+    sections.join("\n\n")
 }
 
 #[cfg(test)]
@@ -58,5 +88,35 @@ mod tests {
         assert!(p.contains("Re-check PLAN as you go"));
         // the hard branch-first rule survives
         assert!(p.contains("STOP and report the git state"));
+    }
+
+    #[test]
+    fn agents_md_is_embedded_when_present_and_skipped_when_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentj-prompt-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap();
+
+        // No AGENTS.md → no project_docs section.
+        assert!(!system_prompt(root, None).contains("<project_docs>"));
+
+        std::fs::write(dir.join("AGENTS.md"), "# The Map\nBuild with `make x`.").unwrap();
+        let p = system_prompt(root, None);
+        assert!(p.contains("<project_docs>"));
+        assert!(p.contains("Build with `make x`."));
+        assert!(p.contains("Subdirectories may carry their own AGENTS.md"));
+
+        // Oversized docs are truncated with a pointer, not dropped.
+        std::fs::write(dir.join("AGENTS.md"), "x".repeat(30_000)).unwrap();
+        let p = system_prompt(root, None);
+        assert!(p.contains("truncated — read AGENTS.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

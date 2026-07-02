@@ -523,6 +523,7 @@ pub fn tool_specs(allow_delegate: bool) -> Vec<ToolSpec> {
                             "type": "object",
                             "properties": {
                                 "task": { "type": "string", "description": "The self-contained sub-task instruction." },
+                                "title": { "type": "string", "description": "A short 3–8 word label for this sub-task, shown in the UI while it runs (e.g. 'Map the Rust crate')." },
                                 "context": { "type": "string", "description": "Optional extra context (paths, findings) the subagent needs." }
                             },
                             "required": ["task"]
