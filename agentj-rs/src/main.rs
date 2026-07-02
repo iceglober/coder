@@ -40,8 +40,10 @@ Options:
   -h, --help          show this help
   -v, --version       show version
 
-Notes: azure/custom (OpenAI-compatible) providers are wired; vertex/anthropic are staged. MCP works
-for stdio + no-auth streamable-http servers (from .mcp.json); static-header/OAuth servers are staged.";
+Notes: app config is loaded from ~/.config/aj/aj.json, ./.aj/aj.json, and ./.aj/aj.local.json
+(project-local wins; env overrides files; CLI overrides env). Azure/custom (OpenAI-compatible)
+providers are wired; vertex/anthropic are staged. MCP works for stdio + no-auth streamable-http
+servers (from .mcp.json); static-header/OAuth servers are staged.";
 
 struct Args {
     provider: Option<Provider>,
@@ -68,7 +70,9 @@ fn parse_args(argv: &[String]) -> Args {
             "-v" | "--version" => a.version = true,
             "--provider" => {
                 i += 1;
-                a.provider = argv.get(i).map(|s| resolve_provider(Some(s)));
+                a.provider = argv
+                    .get(i)
+                    .map(|s| resolve_provider(Some(s), &config::AppConfig::default()));
             }
             "--model" => {
                 i += 1;
@@ -150,17 +154,20 @@ async fn main() {
         return;
     }
 
-    let provider = args.provider.unwrap_or_else(|| resolve_provider(None));
+    let root = repo_root().await;
+    let app_cfg = config::AppConfig::load(&root);
+
+    let provider = args.provider.unwrap_or_else(|| resolve_provider(None, &app_cfg));
     let sel = Selector {
         provider,
         model: args.model.as_deref(),
         base_url: args.base_url.as_deref(),
     };
-    if let Err(e) = preflight(&sel) {
+    if let Err(e) = preflight(&sel, &app_cfg) {
         eprintln!("{e}");
         std::process::exit(1);
     }
-    let cfg = match resolve_model(&sel) {
+    let cfg = match resolve_model(&sel, &app_cfg) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -175,10 +182,7 @@ async fn main() {
         }
     };
 
-    let root = repo_root().await;
-    let company = std::env::var("AGENTJ_COMPANY")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let company = config::AppConfig::env_or_file("AGENTJ_COMPANY", app_cfg.company.as_deref());
     let system = prompt::system_prompt(&root, company.as_deref());
 
     // Connect MCP servers once at startup; failures become one-line notices.
@@ -195,7 +199,7 @@ async fn main() {
     let sess = agent::Session {
         llm: Arc::new(llm),
         tools: Arc::new(tools),
-        cfg: Arc::new(config::Config::from_env(&cfg.model_id)),
+        cfg: Arc::new(config::Config::from_sources(&cfg.model_id, &app_cfg)),
     };
 
     if !std::io::stdin().is_terminal() && args.once.is_none() {

@@ -1,6 +1,7 @@
 //! Model/provider resolution. Port of `model.ts`. Stage 1 wires the OpenAI-compatible path (azure +
 //! custom) end-to-end; vertex + anthropic are recognized and preflighted but their clients are staged.
 
+use crate::config::AppConfig;
 use std::env;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,9 +23,12 @@ impl Provider {
     }
 }
 
-/// Resolve the active provider from a string (flag or `AGENTJ_PROVIDER`); default Vertex.
-pub fn resolve_provider(value: Option<&str>) -> Provider {
-    match value.or(_env("AGENTJ_PROVIDER").as_deref()) {
+/// Resolve the active provider from a string (flag or `AGENTJ_PROVIDER`), then app config; default Vertex.
+pub fn resolve_provider(value: Option<&str>, app: &AppConfig) -> Provider {
+    match value
+        .or(_env("AGENTJ_PROVIDER").as_deref())
+        .or(app.provider.as_deref())
+    {
         Some("anthropic") => Provider::Anthropic,
         Some("azure") => Provider::Azure,
         Some("custom") => Provider::Custom,
@@ -62,20 +66,22 @@ pub struct Selector<'a> {
     pub base_url: Option<&'a str>,
 }
 
-fn custom_base_url(explicit: Option<&str>) -> String {
+fn custom_base_url(explicit: Option<&str>, app: &AppConfig) -> String {
     explicit
         .map(|s| s.to_string())
         .or_else(|| _env("AGENTJ_BASE_URL"))
+        .or_else(|| app.base_url.clone().filter(|s| !s.is_empty()))
         .unwrap_or_default()
 }
 
 /// Check provider credentials/config before a run. `Ok(())` when ready; `Err(msg)` with an actionable
 /// message otherwise. Mirrors `preflight` in model.ts.
-pub fn preflight(sel: &Selector) -> Result<(), String> {
+pub fn preflight(sel: &Selector, app: &AppConfig) -> Result<(), String> {
     let model_id = sel
         .model
         .map(|s| s.to_string())
-        .or_else(|| _env("AGENTJ_MODEL"));
+        .or_else(|| _env("AGENTJ_MODEL"))
+        .or_else(|| app.model.clone().filter(|s| !s.is_empty()));
     match sel.provider {
         Provider::Vertex => {
             if _env("GOOGLE_VERTEX_PROJECT").is_none() {
@@ -102,7 +108,7 @@ pub fn preflight(sel: &Selector) -> Result<(), String> {
             Ok(())
         }
         Provider::Custom => {
-            if custom_base_url(sel.base_url).is_empty() {
+            if custom_base_url(sel.base_url, app).is_empty() {
                 return Err("Custom provider needs a base URL — set AGENTJ_BASE_URL or pass --base-url (e.g. a Bifrost gateway: http://localhost:8080/v1).".into());
             }
             if model_id.is_none() {
@@ -140,11 +146,12 @@ pub fn context_window(model_id: &str) -> Option<u64> {
 }
 
 /// Resolve a runnable model config. Callers preflight first.
-pub fn resolve_model(sel: &Selector) -> Result<ModelConfig, String> {
+pub fn resolve_model(sel: &Selector, app: &AppConfig) -> Result<ModelConfig, String> {
     let model_id = sel
         .model
         .map(|s| s.to_string())
         .or_else(|| _env("AGENTJ_MODEL"))
+        .or_else(|| app.model.clone().filter(|s| !s.is_empty()))
         .or_else(|| default_model(sel.provider).map(|s| s.to_string()))
         .ok_or_else(|| {
             format!(
@@ -159,7 +166,7 @@ pub fn resolve_model(sel: &Selector) -> Result<ModelConfig, String> {
             _env("AZURE_API_KEY"),
             _env("AZURE_API_VERSION"),
         ),
-        Provider::Custom => (custom_base_url(sel.base_url), _env("AGENTJ_API_KEY"), None),
+        Provider::Custom => (custom_base_url(sel.base_url, app), _env("AGENTJ_API_KEY"), None),
         Provider::Vertex => (String::new(), None, None),
         Provider::Anthropic => (String::new(), _env("ANTHROPIC_API_KEY"), None),
     };
@@ -178,11 +185,22 @@ mod tests {
 
     #[test]
     fn provider_resolution() {
-        assert_eq!(resolve_provider(Some("anthropic")), Provider::Anthropic);
-        assert_eq!(resolve_provider(Some("azure")), Provider::Azure);
-        assert_eq!(resolve_provider(Some("custom")), Provider::Custom);
-        assert_eq!(resolve_provider(Some("openai")), Provider::Vertex);
-        assert_eq!(resolve_provider(None), Provider::Vertex);
+        let empty = AppConfig::default();
+        assert_eq!(resolve_provider(Some("anthropic"), &empty), Provider::Anthropic);
+        assert_eq!(resolve_provider(Some("azure"), &empty), Provider::Azure);
+        assert_eq!(resolve_provider(Some("custom"), &empty), Provider::Custom);
+        assert_eq!(resolve_provider(Some("openai"), &empty), Provider::Vertex);
+        assert_eq!(resolve_provider(None, &empty), Provider::Vertex);
+        assert_eq!(
+            resolve_provider(
+                None,
+                &AppConfig {
+                    provider: Some("azure".into()),
+                    ..Default::default()
+                }
+            ),
+            Provider::Azure
+        );
     }
 
     #[test]
@@ -202,12 +220,12 @@ mod tests {
             model: None,
             base_url: None,
         };
-        assert!(preflight(&s).unwrap_err().contains("base URL"));
+        assert!(preflight(&s, &AppConfig::default()).unwrap_err().contains("base URL"));
         let s = Selector {
             provider: Provider::Custom,
             model: Some("m"),
             base_url: Some("http://x/v1"),
         };
-        assert!(preflight(&s).is_ok());
+        assert!(preflight(&s, &AppConfig::default()).is_ok());
     }
 }
